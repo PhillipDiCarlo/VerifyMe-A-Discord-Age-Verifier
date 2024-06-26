@@ -1,0 +1,323 @@
+Instructions
+
+For this project, you will need at least two Python files:
+
+1. **Discord Bot Script**: This script will handle the Discord bot's functionality, including commands, role assignments, and interaction with the Flask server.
+2. **Flask Server Script**: This script will manage the webhook endpoints for both Stripe and Wix to handle subscription events and OAuth callbacks.
+
+### File 1: Discord Bot Script (`bot.py`)
+This script contains the main logic for the Discord bot.
+
+```python
+import discord
+from discord.ext import commands
+import requests
+from dotenv import load_dotenv
+import os
+import asyncio
+
+# Load environment variables
+load_dotenv()
+
+# Retrieve environment variables
+DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+REDIRECT_URI = os.getenv('REDIRECT_URI')
+
+# Initialize the Discord bot
+intents = discord.Intents.default()
+intents.messages = True
+intents.guilds = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# In-memory storage for active subscriptions (for demonstration)
+active_subscriptions = {}
+
+# Subscription tier requirements
+tier_requirements = {
+    "tier_A": 250,
+    "tier_B": 500,
+    "tier_C": 1000,
+    "tier_D": 5000,
+    "tier_E": float('inf')  # No upper limit
+}
+
+def get_required_tier(member_count):
+    if member_count <= tier_requirements["tier_A"]:
+        return "tier_A"
+    elif member_count <= tier_requirements["tier_B"]:
+        return "tier_B"
+    elif member_count <= tier_requirements["tier_C"]:
+        return "tier_C"
+    elif member_count <= tier_requirements["tier_D"]:
+        return "tier_D"
+    else:
+        return "tier_E"
+
+@bot.command()
+async def verify(ctx, role: discord.Role):
+    guild_id = str(ctx.guild.id)
+    member_count = ctx.guild.member_count
+
+    required_tier = get_required_tier(member_count)
+    subscribed_tier = active_subscriptions.get(guild_id)
+
+    if not subscribed_tier:
+        await ctx.send("This server does not have an active subscription.")
+        return
+
+    if tier_requirements[subscribed_tier] < tier_requirements[required_tier]:
+        await ctx.send(f"This server's subscription ({subscribed_tier}) does not cover {member_count} members. Please upgrade to {required_tier}.")
+        return
+
+    button = discord.ui.Button(label="Verify Age", url=f"http://localhost:5000/start_verification?guild_id={guild_id}&user_id={ctx.author.id}&role_id={role.id}")
+    view = discord.ui.View()
+    view.add_item(button)
+    await ctx.send(f"This server has {member_count} members. Click the button below to verify your age:", view=view)
+
+async def assign_role(guild_id, user_id, role_id):
+    guild = bot.get_guild(int(guild_id))
+    member = guild.get_member(int(user_id))
+    role = guild.get_role(int(role_id))
+    if member and role:
+        await member.add_roles(role)
+
+if __name__ == '__main__':
+    bot.loop.create_task(bot.start(DISCORD_BOT_TOKEN))
+```
+
+### File 2: Flask Server Script (`server.py`)
+This script handles the Flask server logic, including webhooks for subscription management and OAuth callbacks.
+
+```python
+import json
+from flask import Flask, request, jsonify, session, redirect
+import requests
+from dotenv import load_dotenv
+import os
+import asyncio
+from bot import assign_role, active_subscriptions
+
+# Load environment variables
+load_dotenv()
+
+app = Flask(__name__)
+app.secret_key = os.getenv('SECRET_KEY')
+
+ID_ME_CLIENT_ID = os.getenv('ID_ME_CLIENT_ID')
+ID_ME_CLIENT_SECRET = os.getenv('ID_ME_CLIENT_SECRET')
+REDIRECT_URI = os.getenv('REDIRECT_URI')
+
+@app.route('/wix_webhook', methods=['POST'])
+def wix_webhook():
+    data = request.get_json()
+    event_type = data.get('event_type')
+
+    if event_type == 'subscription_created':
+        handle_subscription_created(data['data'])
+    elif event_type == 'subscription_cancelled':
+        handle_subscription_cancelled(data['data'])
+    else:
+        return jsonify(success=False), 400
+
+    return jsonify(success=True), 200
+
+def handle_subscription_created(data):
+    guild_id = data['guildId']
+    tier = data['tier']
+    active_subscriptions[guild_id] = tier
+
+def handle_subscription_cancelled(data):
+    guild_id = data['guildId']
+    if guild_id in active_subscriptions:
+        del active_subscriptions[guild_id]
+
+@app.route('/callback')
+def callback():
+    code = request.args.get('code')
+    guild_id = session.get('guild_id')
+    user_id = session.get('user_id')
+    role_id = session.get('role_id')
+
+    token_url = 'https://api.id.me/oauth/token'
+    token_data = {
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': REDIRECT_URI,
+        'client_id': ID_ME_CLIENT_ID,
+        'client_secret': ID_ME_CLIENT_SECRET,
+    }
+    token_response = requests.post(token_url, data=token_data)
+    tokens = token_response.json()
+
+    user_info_url = 'https://api.id.me/api/public/v3/attributes'
+    headers = {'Authorization': f'Bearer {tokens["access_token"]}'}
+    user_info_response = requests.get(user_info_url, headers=headers)
+    user_info = user_info_response.json()
+
+    # Check if the user is over 18
+    if user_info.get("age_verified"):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(assign_role(guild_id, user_id, role_id))
+        return "Verification successful, role assigned!"
+    return "Verification failed."
+
+@app.route('/start_verification')
+def start_verification():
+    guild_id = request.args.get('guild_id')
+    user_id = request.args.get('user_id')
+    role_id = request.args.get('role_id')
+    session['guild_id'] = guild_id
+    session['user_id'] = user_id
+    session['role_id'] = role_id
+
+    authorization_url = (
+        f'https://api.id.me/oauth/authorize?response_type=code&client_id={ID_ME_CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope=openid'
+    )
+    return redirect(authorization_url)
+
+if __name__ == '__main__':
+    app.run(port=5000)
+```
+
+### `.env` File
+To store your sensitive data, create a `.env` file:
+
+```
+DISCORD_BOT_TOKEN=your_discord_bot_token
+ID_ME_CLIENT_ID=your_id_me_client_id
+ID_ME_CLIENT_SECRET=your_id_me_client_secret
+SECRET_KEY=your_flask_secret_key
+REDIRECT_URI=http://localhost:5000/callback
+STRIPE_API_KEY=your_stripe_api_key
+STRIPE_ENDPOINT_SECRET=your_stripe_endpoint_secret
+```
+
+### `.gitignore` File
+Ensure that your `.env` file and other unnecessary files are not tracked by git:
+
+```
+# .gitignore
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyderworkspace
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+
+# Pyre type checker
+.pyre/
+
+# Flask specific
+instance/
+*.pyc
+
+# Local environment
+.env
+```
+
+### Summary
+You need two Python files:
+1. **`bot.py`**: Handles the Discord bot logic.
+2. **`server.py`**: Manages the Flask server and webhook handling.
+
+Additionally, create a `.env` file for sensitive data and a `.gitignore` file to ensure certain files are not tracked by git. This setup will help you manage subscriptions and role assignments in your Discord server.
