@@ -108,6 +108,19 @@ command_usage = Table(
     Column('timestamp', TIMESTAMP, nullable=False)
 )
 
+SUPPORTED_COUNTRIES = {
+    "ALB", "DZA", "AND", "ARG", "ARM", "AUS", "AUT", "AZE", "BHR", "BLR", "BEL", "BLZ", "BEN", "BMU", "BTN", "BIH",
+    "BRA", "BRN", "BGR", "BFA", "BDI", "KHM", "CMR", "CAN", "CYM", "CAF", "CHL", "CHN", "COL", "COG", "CRI", "HRV",
+    "CUB", "CYP", "CZE", "CIV", "DNK", "DJI", "DMA", "DOM", "ECU", "EGY", "SLV", "GNQ", "EST", "ETH", "FRO", "FJI",
+    "FIN", "FRA", "GAB", "GEO", "DEU", "GIB", "GRC", "GRD", "GTM", "GGY", "GIN", "HND", "HKG", "HUN", "ISL", "IND",
+    "IDN", "IRN", "IRL", "IMN", "ISR", "ITA", "JAM", "JPN", "JEY", "KAZ", "KEN", "KOR", "KWT", "KGZ", "LVA", "LBN",
+    "LSO", "LIE", "LTU", "LUX", "MWI", "MYS", "MLI", "MLT", "MRT", "MEX", "MDA", "MCO", "MNE", "MSR", "MAR", "NAM",
+    "NPL", "NLD", "NZL", "NIC", "NER", "NGA", "NFK", "NOR", "OMN", "PAK", "PSE", "PAN", "PRY", "PER", "PHL", "POL",
+    "PRT", "PRI", "QAT", "RKS", "ROU", "RUS", "KNA", "LCA", "VCT", "WSM", "SAU", "SRB", "SGP", "SVK", "SVN", "SOM",
+    "ZAF", "ESP", "LKA", "SDN", "SWE", "CHE", "SYR", "TWN", "TJK", "TZA", "THA", "TGO", "TTO", "TUN", "TUR", "TKM",
+    "TCA", "TUV", "UGA", "UKR", "ARE", "GBR", "USA", "UZB", "VUT", "VEN", "VNM", "VGB", "ZMB", "ZWE", "ALA"
+}
+
 # Create tables in the database
 metadata.create_all(engine)
 
@@ -177,90 +190,40 @@ def check_tier_requirements(guild):
 
 def locale_to_country_code(locale):
     locale_map = {
-        # Top 60 countries by population (approximately) and common locales
-        'zh': 'CHN',     # China
-        'en-IN': 'IND',  # India
-        'en-US': 'USA',  # United States
-        'id': 'IDN',     # Indonesia
-        'ur-PK': 'PAK',  # Pakistan
-        'pt-BR': 'BRA',  # Brazil
-        'bn-BD': 'BGD',  # Bangladesh
-        'ru': 'RUS',     # Russia
-        'ja': 'JPN',     # Japan
-        'es-MX': 'MEX',  # Mexico
-        'fil': 'PHL',    # Philippines
-        'en-NG': 'NGA',  # Nigeria
-        'vi': 'VNM',     # Vietnam
-        'de': 'DEU',     # Germany
-        'eg': 'EGY',     # Egypt
-        'tr': 'TUR',     # Turkey
-        'fa': 'IRN',     # Iran
-        'th': 'THA',     # Thailand
-        'en-GB': 'GBR',  # United Kingdom
-        'fr': 'FRA',     # France
-        'it': 'ITA',     # Italy
-        'my': 'MMR',     # Myanmar
-        'ko': 'KOR',     # South Korea
-        'es-CO': 'COL',  # Colombia
-        'es': 'ESP',     # Spain
-        'uk': 'UKR',     # Ukraine
-        'sw': 'TZA',     # Tanzania
-        'pl': 'POL',     # Poland
-        'ar-SA': 'SAU',  # Saudi Arabia
-        'ar': 'DZA',     # Algeria
-        'am': 'ETH',     # Ethiopia
-        'en-CA': 'CAN',  # Canada
-        'ro': 'ROU',     # Romania
-        'nl': 'NLD',     # Netherlands
-        'km': 'KHM',     # Cambodia
-        'si': 'LKA',     # Sri Lanka
-        'msa': 'MYS',    # Malaysia
-        'ne': 'NPL',     # Nepal
-        've': 'VEN',     # Venezuela
-        'mg': 'MDG',     # Madagascar
-        'cm': 'CMR',     # Cameroon
-        'ko-KP': 'PRK',  # North Korea
-        'ci': 'CIV',     # Côte d'Ivoire
-        'en-AU': 'AUS',  # Australia
-        'ni': 'NER',     # Niger
-        'lk': 'LKA',     # Sri Lanka
-        'bu': 'BFA',     # Burkina Faso
-        'ml': 'MLI',     # Mali
-        'ro-MD': 'MDA',  # Moldova
-        'sy': 'SYR',     # Syria
-        'cl': 'CHL',     # Chile
-        'kk': 'KAZ',     # Kazakhstan
-        'sn': 'SEN',     # Senegal
-        'nl-BE': 'BEL',  # Belgium
-        'cu': 'CUB',     # Cuba
-        'ht': 'HTI',     # Haiti
-        'bo': 'BOL',     # Bolivia
-        'by': 'BLR',     # Belarus
-        'do': 'DOM',     # Dominican Republic
-        'cs': 'CZE',     # Czech Republic
-        'pt-PT': 'PRT',  # Portugal
-        'sv-SE': 'SWE',  # Sweden
-        'az': 'AZE',     # Azerbaijan
-        
-        # Additional common locales
-        'zh-TW': 'TWN',  # Taiwan
-        'hi': 'IND',     # Hindi (India)
-        'ar-EG': 'EGY',  # Egypt (Arabic)
-        'es-AR': 'ARG',  # Argentina
-        'de-AT': 'AUT',  # Austria
-        'de-CH': 'CHE',  # Switzerland (German)
-        'fr-CH': 'CHE',  # Switzerland (French)
-        'it-CH': 'CHE',  # Switzerland (Italian)
-        'fr-CA': 'CAN',  # Canada (French)
-        'en-IE': 'IRL',  # Ireland
-        'en-NZ': 'NZL',  # New Zealand
-        'en-ZA': 'ZAF',  # South Africa
-        'es-PE': 'PER',  # Peru
-        'es-CL': 'CHL',  # Chile
-        'pt-AO': 'AGO',  # Angola
-        'ar-MA': 'MAR',  # Morocco
+        'af': 'AFG', 'al': 'ALB', 'dz': 'DZA', 'as': 'ASM', 'ad': 'AND', 'ao': 'AGO', 'ai': 'AIA', 'aq': 'ATA',
+        'ag': 'ATG', 'ar': 'ARG', 'am': 'ARM', 'aw': 'ABW', 'au': 'AUS', 'at': 'AUT', 'az': 'AZE', 'bs': 'BHS',
+        'bh': 'BHR', 'bd': 'BGD', 'bb': 'BRB', 'by': 'BLR', 'be': 'BEL', 'bz': 'BLZ', 'bj': 'BEN', 'bm': 'BMU',
+        'bt': 'BTN', 'bo': 'BOL', 'bq': 'BES', 'ba': 'BIH', 'bw': 'BWA', 'bv': 'BVT', 'br': 'BRA', 'io': 'IOT',
+        'bn': 'BRN', 'bg': 'BGR', 'bf': 'BFA', 'bi': 'BDI', 'cv': 'CPV', 'kh': 'KHM', 'cm': 'CMR', 'ca': 'CAN',
+        'ky': 'CYM', 'cf': 'CAF', 'td': 'TCD', 'cl': 'CHL', 'cn': 'CHN', 'cx': 'CXR', 'cc': 'CCK', 'co': 'COL',
+        'km': 'COM', 'cg': 'COG', 'cd': 'COD', 'ck': 'COK', 'cr': 'CRI', 'hr': 'HRV', 'cu': 'CUB', 'cw': 'CUW',
+        'cy': 'CYP', 'cz': 'CZE', 'ci': 'CIV', 'dk': 'DNK', 'dj': 'DJI', 'dm': 'DMA', 'do': 'DOM', 'ec': 'ECU',
+        'eg': 'EGY', 'sv': 'SLV', 'gq': 'GNQ', 'er': 'ERI', 'ee': 'EST', 'et': 'ETH', 'fk': 'FLK', 'fo': 'FRO',
+        'fj': 'FJI', 'fi': 'FIN', 'fr': 'FRA', 'gf': 'GUF', 'pf': 'PYF', 'tf': 'ATF', 'ga': 'GAB', 'gm': 'GMB',
+        'ge': 'GEO', 'de': 'DEU', 'gh': 'GHA', 'gi': 'GIB', 'gr': 'GRC', 'gl': 'GRL', 'gd': 'GRD', 'gp': 'GLP',
+        'gu': 'GUM', 'gt': 'GTM', 'gg': 'GGY', 'gn': 'GIN', 'gw': 'GNB', 'gy': 'GUY', 'ht': 'HTI', 'hm': 'HMD',
+        'va': 'VAT', 'hn': 'HND', 'hk': 'HKG', 'hu': 'HUN', 'is': 'ISL', 'in': 'IND', 'id': 'IDN', 'ir': 'IRN',
+        'iq': 'IRQ', 'ie': 'IRL', 'im': 'IMN', 'il': 'ISR', 'it': 'ITA', 'jm': 'JAM', 'jp': 'JPN', 'je': 'JEY',
+        'jo': 'JOR', 'kz': 'KAZ', 'ke': 'KEN', 'ki': 'KIR', 'kp': 'PRK', 'kr': 'KOR', 'kw': 'KWT', 'kg': 'KGZ',
+        'la': 'LAO', 'lv': 'LVA', 'lb': 'LBN', 'ls': 'LSO', 'lr': 'LBR', 'ly': 'LBY', 'li': 'LIE', 'lt': 'LTU',
+        'lu': 'LUX', 'mo': 'MAC', 'mg': 'MDG', 'mw': 'MWI', 'my': 'MYS', 'mv': 'MDV', 'ml': 'MLI', 'mt': 'MLT',
+        'mh': 'MHL', 'mq': 'MTQ', 'mr': 'MRT', 'mu': 'MUS', 'yt': 'MYT', 'mx': 'MEX', 'fm': 'FSM', 'md': 'MDA',
+        'mc': 'MCO', 'mn': 'MNG', 'me': 'MNE', 'ms': 'MSR', 'ma': 'MAR', 'mz': 'MOZ', 'mm': 'MMR', 'na': 'NAM',
+        'nr': 'NRU', 'np': 'NPL', 'nl': 'NLD', 'nc': 'NCL', 'nz': 'NZL', 'ni': 'NIC', 'ne': 'NER', 'ng': 'NGA',
+        'nu': 'NIU', 'nf': 'NFK', 'mk': 'MKD', 'mp': 'MNP', 'no': 'NOR', 'om': 'OMN', 'pk': 'PAK', 'pw': 'PLW',
+        'ps': 'PSE', 'pa': 'PAN', 'pg': 'PNG', 'py': 'PRY', 'pe': 'PER', 'ph': 'PHL', 'pn': 'PCN', 'pl': 'POL',
+        'pt': 'PRT', 'pr': 'PRI', 'qa': 'QAT', 'xk': 'RKS', 'ro': 'ROU', 'ru': 'RUS', 'rw': 'RWA', 're': 'REU',
+        'bl': 'BLM', 'sh': 'SHN', 'kn': 'KNA', 'lc': 'LCA', 'mf': 'MAF', 'pm': 'SPM', 'vc': 'VCT', 'ws': 'WSM',
+        'sm': 'SMR', 'st': 'STP', 'sa': 'SAU', 'sn': 'SEN', 'rs': 'SRB', 'sc': 'SYC', 'sl': 'SLE', 'sg': 'SGP',
+        'sx': 'SXM', 'sk': 'SVK', 'si': 'SVN', 'sb': 'SLB', 'so': 'SOM', 'za': 'ZAF', 'gs': 'SGS', 'ss': 'SSD',
+        'es': 'ESP', 'lk': 'LKA', 'sd': 'SDN', 'sr': 'SUR', 'sj': 'SJM', 'se': 'SWE', 'ch': 'CHE', 'sy': 'SYR',
+        'tw': 'TWN', 'tj': 'TJK', 'tz': 'TZA', 'th': 'THA', 'tl': 'TLS', 'tg': 'TGO', 'tk': 'TKL', 'to': 'TON',
+        'tt': 'TTO', 'tn': 'TUN', 'tr': 'TUR', 'tm': 'TKM', 'tc': 'TCA', 'tv': 'TUV', 'ug': 'UGA', 'ua': 'UKR',
+        'ae': 'ARE', 'gb': 'GBR', 'um': 'UMI', 'us': 'USA', 'uy': 'URY', 'uz': 'UZB', 'vu': 'VUT', 've': 'VEN',
+        'vn': 'VNM', 'vg': 'VGB', 'vi': 'VIR', 'wf': 'WLF', 'eh': 'ESH', 'ye': 'YEM', 'zm': 'ZMB', 'zw': 'ZWE',
+        'sz': 'SWZ', 'ax': 'ALA'
     }
-    return locale_map.get(locale, 'USA')  # Default to USA if not found
+    return locale_map.get(locale.lower().split('-')[0], 'USA')  # Default to USA if not found
 
 async def assign_role(guild_id, user_id, role_id):
     guild = bot.get_guild(int(guild_id))
@@ -316,7 +279,16 @@ async def verify(ctx):
         await ctx.send("You are already verified. Role has been assigned.")
         return
 
-    verification_url = await generate_onfido_verification_url(guild_id, ctx.author.id, server_config.role_id)
+    # Get the user's locale
+    # user_locale = str(ctx.author.locale) if ctx.author.locale else 'en-US'
+    user_locale = 'en-US' # TODO: Temp Solution
+    country_code = locale_to_country_code(user_locale)
+
+    if country_code not in SUPPORTED_COUNTRIES:
+        await ctx.send(f"Sorry, the verification bot is not available in your country ({country_code}). Verification cannot proceed.")
+        return
+
+    verification_url = await generate_onfido_verification_url(guild_id, ctx.author.id, server_config.role_id, user_locale)
     
     if not verification_url:
         await ctx.send("Failed to initiate verification process. Please try again later or contact support.")
@@ -327,6 +299,64 @@ async def verify(ctx):
     logging.info(f"Generated verification URL for user {ctx.author.id}: {verification_url}")
     await ctx.send(f"This server has {member_count} members. Click the link below to verify your age: {verification_url}")
 
+# Update the generate_onfido_verification_url function to use the country code:
+async def generate_onfido_verification_url(guild_id, user_id, role_id, user_locale):
+    try:
+        # Convert Discord locale to country code
+        country_code = locale_to_country_code(user_locale)
+
+        # Create an applicant
+        applicant = onfido_api.create_applicant(
+            onfido.ApplicantBuilder(
+                first_name="Discord",
+                last_name="User",
+                external_id=f"{guild_id}-{user_id}-{role_id}",
+                location=onfido.LocationBuilder(
+                    country_of_residence=country_code
+                ),
+                consents=onfido.ConsentsBuilder(
+                    privacy_notices_read=True
+                )
+            )
+        )
+        
+        logging.info(f"Onfido API response (applicants): {applicant}")
+
+        # Create a check
+        check = onfido_api.create_check(
+            onfido.CheckBuilder(
+                applicant_id=applicant.id,
+                report_names=["identity_enhanced"],
+                consider=None,
+                async_=True
+            )
+        )
+        
+        logging.info(f"Onfido API response (checks): {check}")
+
+        # Generate SDK token
+        sdk_token = onfido_api.generate_sdk_token(
+            onfido.SdkTokenBuilder(
+                applicant_id=applicant.id,
+                referrer="*://*/*"
+            )
+        )
+
+        # Use the SDK token to create the verification URL
+        verification_url = f"https://id.onfido.com/start_iframe?sdk_token={sdk_token.token}"
+
+        return verification_url
+
+    except onfido.ApiException as e:
+        logging.error(f"Failed to create Onfido applicant or check: {e}")
+        logging.error(f"Response body: {e.body}")
+        return None
+    except Exception as e:
+        logging.error(f"Unexpected error in generate_onfido_verification_url: {e}")
+        return None
+
+
+# Update the reverify command similarly:
 @bot.command()
 @commands.cooldown(1, COOLDOWN_PERIOD, BucketType.user)
 async def reverify(ctx):
@@ -358,10 +388,25 @@ async def reverify(ctx):
         await ctx.send(f"You are currently in a cooldown period. Please wait before attempting to verify again.")
         return
 
-    verification_url = generate_onfido_verification_url(guild_id, ctx.author.id, server_config.role_id)
+    # Get the user's locale
+    # user_locale = str(ctx.author.locale) if ctx.author.locale else 'en-US'
+    user_locale = 'en-US' # TODO: Temp Solution
+    country_code = locale_to_country_code(user_locale)
+
+    if country_code not in SUPPORTED_COUNTRIES:
+        await ctx.send(f"Sorry, the verification bot is not available in your country ({country_code}). Verification cannot proceed.")
+        return
+
+    verification_url = await generate_onfido_verification_url(guild_id, ctx.author.id, server_config.role_id, user_locale)
+
+    if not verification_url:
+        await ctx.send("Failed to initiate verification process. Please try again later or contact support.")
+        return
+
     track_verification_attempt(ctx.author.id)
     track_command_usage(guild_id, ctx.author.id, "reverify")
     await ctx.send(f"This server has {member_count} members. Click the link below to verify your age: {verification_url}")
+
 
 @bot.command()
 async def set_role(ctx, role: discord.Role):
