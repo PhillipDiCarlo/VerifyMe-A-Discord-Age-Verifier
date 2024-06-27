@@ -6,7 +6,7 @@ import requests
 from dotenv import load_dotenv
 import os
 import asyncio
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Boolean, TIMESTAMP
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Boolean, TIMESTAMP, text
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime, timedelta
 import threading
@@ -78,10 +78,10 @@ users = Table(
 servers = Table(
     'servers', metadata,
     Column('id', Integer, primary_key=True),
-    Column('server_id', String(30), nullable=False),
+    Column('server_id', String(30), nullable=False, unique=True),
     Column('owner_id', String(30), nullable=False),
     Column('role_id', String(30), nullable=False),
-    Column('tier', String(1), default='A'),
+    Column('tier', String(50), server_default=text("'tier_A'"), nullable=False),
     Column('subscription_status', Boolean, default=False)
 )
 
@@ -173,8 +173,7 @@ logging.basicConfig(level=logging.INFO)
 # Add logging inside your commands
 @bot.command()
 @commands.cooldown(1, COOLDOWN_PERIOD, BucketType.user)
-
-async def verify(ctx, role: discord.Role):
+async def verify(ctx):
     logging.info(f"Received !verify command from user {ctx.author} in guild {ctx.guild}")
     guild_id = str(ctx.guild.id)
     member_count = ctx.guild.member_count
@@ -183,11 +182,20 @@ async def verify(ctx, role: discord.Role):
     server_config = get_server_config(guild_id)
 
     if not server_config:
+        await ctx.send("No configuration found for this server. Please ask an admin to set up the server using `!set_role @Role` and `!set_subscription [tier]`.")
+        return
+
+    if not server_config.subscription_status:
         logging.warning(f"No active subscription for guild {guild_id}")
         await ctx.send("This server does not have an active subscription.")
         return
 
     subscribed_tier = server_config.tier
+
+    if subscribed_tier not in tier_requirements:
+        logging.warning(f"Invalid subscription tier {subscribed_tier} for guild {guild_id}")
+        await ctx.send("Invalid subscription tier configured for this server. Please ask an admin to correct it using `!set_subscription [tier]`.")
+        return
 
     if tier_requirements[subscribed_tier] < tier_requirements[required_tier]:
         logging.warning(f"Subscription tier {subscribed_tier} does not cover {member_count} members")
@@ -202,19 +210,25 @@ async def verify(ctx, role: discord.Role):
     user = get_user_verification_status(ctx.author.id)
     if user and user.verification_status:
         logging.info(f"User {ctx.author.id} is already verified")
-        await assign_role(guild_id, ctx.author.id, role.id)
+        await assign_role(guild_id, ctx.author.id, server_config.role_id)
         await ctx.send("You are already verified. Role has been assigned.")
         return
 
-    verification_url = generate_onfido_verification_url(guild_id, ctx.author.id, role.id)
+    verification_url = generate_onfido_verification_url(guild_id, ctx.author.id, server_config.role_id)
+    
+    if not verification_url:
+        await ctx.send("Failed to initiate verification process. Please try again later or contact support.")
+        return
+
     track_verification_attempt(ctx.author.id)
     track_command_usage(guild_id, ctx.author.id, "verify")
     logging.info(f"Generated verification URL for user {ctx.author.id}: {verification_url}")
     await ctx.send(f"This server has {member_count} members. Click the link below to verify your age: {verification_url}")
 
+
 @bot.command()
 @commands.cooldown(1, COOLDOWN_PERIOD, BucketType.user)
-async def reverify(ctx, role: discord.Role):
+async def reverify(ctx):
     guild_id = str(ctx.guild.id)
     member_count = ctx.guild.member_count
 
@@ -222,10 +236,18 @@ async def reverify(ctx, role: discord.Role):
     server_config = get_server_config(guild_id)
 
     if not server_config:
+        await ctx.send("No configuration found for this server. Please ask an admin to set up the server using `!set_role @Role` and `!set_subscription [tier]`.")
+        return
+
+    if not server_config.subscription_status:
         await ctx.send("This server does not have an active subscription.")
         return
 
     subscribed_tier = server_config.tier
+
+    if subscribed_tier not in tier_requirements:
+        await ctx.send("Invalid subscription tier configured for this server. Please ask an admin to correct it using `!set_subscription [tier]`.")
+        return
 
     if tier_requirements[subscribed_tier] < tier_requirements[required_tier]:
         await ctx.send(f"This server's subscription ({subscribed_tier}) does not cover {member_count} members. Please upgrade to {required_tier}.")
@@ -235,10 +257,55 @@ async def reverify(ctx, role: discord.Role):
         await ctx.send(f"You are currently in a cooldown period. Please wait before attempting to verify again.")
         return
 
-    verification_url = generate_onfido_verification_url(guild_id, ctx.author.id, role.id)
+    verification_url = generate_onfido_verification_url(guild_id, ctx.author.id, server_config.role_id)
     track_verification_attempt(ctx.author.id)
     track_command_usage(guild_id, ctx.author.id, "reverify")
     await ctx.send(f"This server has {member_count} members. Click the link below to verify your age: {verification_url}")
+
+@bot.command()
+async def set_role(ctx, role: discord.Role):
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("You do not have permission to use this command.")
+        return
+
+    guild_id = str(ctx.guild.id)
+    server_config = get_server_config(guild_id)
+
+    if not server_config:
+        db_session.execute(servers.insert().values(
+            server_id=guild_id,
+            owner_id=str(ctx.guild.owner_id),
+            role_id=str(role.id),
+            subscription_status=True  # Assuming subscription is active for testing
+        ))
+        db_session.commit()
+    else:
+        server_config.role_id = str(role.id)
+        db_session.commit()
+
+    await ctx.send(f"Role for verification set to: {role.name}")
+
+@bot.command()
+async def set_subscription(ctx, tier: str):
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("You do not have permission to use this command.")
+        return
+
+    guild_id = str(ctx.guild.id)
+    server_config = get_server_config(guild_id)
+
+    if not server_config:
+        await ctx.send("This server does not have an active subscription.")
+        return
+
+    if tier not in tier_requirements:
+        await ctx.send(f"Invalid tier. Available tiers: {', '.join(tier_requirements.keys())}")
+        return
+
+    server_config.tier = tier
+    db_session.commit()
+
+    await ctx.send(f"Subscription tier set to: {tier}")
 
 @bot.command()
 async def ping(ctx):
@@ -248,7 +315,6 @@ async def ping(ctx):
 async def on_ready():
     logging.info(f'Bot is ready. Logged in as {bot.user}')
 
-
 def generate_onfido_verification_url(guild_id, user_id, role_id):
     applicant_data = {
         "first_name": "User",
@@ -256,7 +322,19 @@ def generate_onfido_verification_url(guild_id, user_id, role_id):
         "redirect_uri": REDIRECT_URI,
         "applicant_id": f"{guild_id}-{user_id}-{role_id}"
     }
+    
+    # Print the API token for debugging (Remove this after verifying)
+    logging.info(f"Using Onfido API token: {ONFIDO_API_TOKEN}")
+    
     response = requests.post("https://api.onfido.com/v3/applicants", json=applicant_data, headers={"Authorization": f"Token token={ONFIDO_API_TOKEN}"})
+    
+    # Log the response for debugging
+    logging.info(f"Onfido API response (applicants): {response.json()}")
+    
+    if response.status_code != 201 or "id" not in response.json():
+        logging.error(f"Failed to create Onfido applicant: {response.json()}")
+        return None
+
     applicant_id = response.json()["id"]
 
     check_data = {
@@ -264,9 +342,19 @@ def generate_onfido_verification_url(guild_id, user_id, role_id):
         "report_names": ["identity_enhanced"]
     }
     response = requests.post("https://api.onfido.com/v3/checks", json=check_data, headers={"Authorization": f"Token token={ONFIDO_API_TOKEN}"})
+    
+    # Log the response for debugging
+    logging.info(f"Onfido API response (checks): {response.json()}")
+    
+    if response.status_code != 201 or "id" not in response.json():
+        logging.error(f"Failed to create Onfido check: {response.json()}")
+        return None
+
     check_id = response.json()["id"]
 
     return f"https://your_verification_page_url/start?check_id={check_id}&applicant_id={applicant_id}"
+
+
 
 @app.route('/callback', methods=['POST'])
 def callback():
