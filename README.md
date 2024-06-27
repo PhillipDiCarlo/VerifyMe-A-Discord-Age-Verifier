@@ -1,4 +1,3 @@
-markdown
 # Discord Age Verification Bot
 
 ## Description
