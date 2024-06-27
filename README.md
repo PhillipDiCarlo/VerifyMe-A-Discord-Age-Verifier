@@ -1,5 +1,3 @@
-Certainly! Here's a README.md file that you could use for your Git repository:
-
 ```markdown
 # Discord Age Verification Bot
 
