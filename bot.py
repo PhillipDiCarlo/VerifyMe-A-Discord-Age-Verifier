@@ -2,15 +2,19 @@ import discord
 from discord.ext import commands
 from discord.ext.commands import BucketType
 from flask import Flask, request, redirect, session, jsonify
-import requests
-from dotenv import load_dotenv
 import os
+from os import environ
 import asyncio
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Boolean, TIMESTAMP, text
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime, timedelta
 import threading
 import logging
+from dotenv import load_dotenv
+import onfido
+import urllib3
+
+# print(onfido.__version__)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -34,12 +38,22 @@ intents.messages = True
 intents.guilds = True
 intents.members = True
 intents.message_content = True  # Ensure message content intent is enabled
+intents.presences = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Flask app setup
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
+
+# Onfido client configuration
+configuration = onfido.Configuration(
+    api_token=environ['ONFIDO_API_TOKEN'],
+    region=onfido.configuration.Region.US,
+    timeout=urllib3.util.Timeout(connect=60.0, read=60.0)
+)
+# configuration.host = "https://api.us.onfido.com/v3.6"
+onfido_api = onfido.DefaultApi(onfido.ApiClient(configuration))
 
 # Subscription tier requirements
 tier_requirements = {
@@ -160,6 +174,94 @@ def check_tier_requirements(guild):
             return False, tier_limit
     return True, None
 
+
+def locale_to_country_code(locale):
+    locale_map = {
+        # Top 60 countries by population (approximately) and common locales
+        'zh': 'CHN',     # China
+        'en-IN': 'IND',  # India
+        'en-US': 'USA',  # United States
+        'id': 'IDN',     # Indonesia
+        'ur-PK': 'PAK',  # Pakistan
+        'pt-BR': 'BRA',  # Brazil
+        'bn-BD': 'BGD',  # Bangladesh
+        'ru': 'RUS',     # Russia
+        'ja': 'JPN',     # Japan
+        'es-MX': 'MEX',  # Mexico
+        'fil': 'PHL',    # Philippines
+        'en-NG': 'NGA',  # Nigeria
+        'vi': 'VNM',     # Vietnam
+        'de': 'DEU',     # Germany
+        'eg': 'EGY',     # Egypt
+        'tr': 'TUR',     # Turkey
+        'fa': 'IRN',     # Iran
+        'th': 'THA',     # Thailand
+        'en-GB': 'GBR',  # United Kingdom
+        'fr': 'FRA',     # France
+        'it': 'ITA',     # Italy
+        'my': 'MMR',     # Myanmar
+        'ko': 'KOR',     # South Korea
+        'es-CO': 'COL',  # Colombia
+        'es': 'ESP',     # Spain
+        'uk': 'UKR',     # Ukraine
+        'sw': 'TZA',     # Tanzania
+        'pl': 'POL',     # Poland
+        'ar-SA': 'SAU',  # Saudi Arabia
+        'ar': 'DZA',     # Algeria
+        'am': 'ETH',     # Ethiopia
+        'en-CA': 'CAN',  # Canada
+        'ro': 'ROU',     # Romania
+        'nl': 'NLD',     # Netherlands
+        'km': 'KHM',     # Cambodia
+        'si': 'LKA',     # Sri Lanka
+        'msa': 'MYS',    # Malaysia
+        'ne': 'NPL',     # Nepal
+        've': 'VEN',     # Venezuela
+        'mg': 'MDG',     # Madagascar
+        'cm': 'CMR',     # Cameroon
+        'ko-KP': 'PRK',  # North Korea
+        'ci': 'CIV',     # Côte d'Ivoire
+        'en-AU': 'AUS',  # Australia
+        'ni': 'NER',     # Niger
+        'lk': 'LKA',     # Sri Lanka
+        'bu': 'BFA',     # Burkina Faso
+        'ml': 'MLI',     # Mali
+        'ro-MD': 'MDA',  # Moldova
+        'sy': 'SYR',     # Syria
+        'cl': 'CHL',     # Chile
+        'kk': 'KAZ',     # Kazakhstan
+        'sn': 'SEN',     # Senegal
+        'nl-BE': 'BEL',  # Belgium
+        'cu': 'CUB',     # Cuba
+        'ht': 'HTI',     # Haiti
+        'bo': 'BOL',     # Bolivia
+        'by': 'BLR',     # Belarus
+        'do': 'DOM',     # Dominican Republic
+        'cs': 'CZE',     # Czech Republic
+        'pt-PT': 'PRT',  # Portugal
+        'sv-SE': 'SWE',  # Sweden
+        'az': 'AZE',     # Azerbaijan
+        
+        # Additional common locales
+        'zh-TW': 'TWN',  # Taiwan
+        'hi': 'IND',     # Hindi (India)
+        'ar-EG': 'EGY',  # Egypt (Arabic)
+        'es-AR': 'ARG',  # Argentina
+        'de-AT': 'AUT',  # Austria
+        'de-CH': 'CHE',  # Switzerland (German)
+        'fr-CH': 'CHE',  # Switzerland (French)
+        'it-CH': 'CHE',  # Switzerland (Italian)
+        'fr-CA': 'CAN',  # Canada (French)
+        'en-IE': 'IRL',  # Ireland
+        'en-NZ': 'NZL',  # New Zealand
+        'en-ZA': 'ZAF',  # South Africa
+        'es-PE': 'PER',  # Peru
+        'es-CL': 'CHL',  # Chile
+        'pt-AO': 'AGO',  # Angola
+        'ar-MA': 'MAR',  # Morocco
+    }
+    return locale_map.get(locale, 'USA')  # Default to USA if not found
+
 async def assign_role(guild_id, user_id, role_id):
     guild = bot.get_guild(int(guild_id))
     member = guild.get_member(int(user_id))
@@ -214,7 +316,7 @@ async def verify(ctx):
         await ctx.send("You are already verified. Role has been assigned.")
         return
 
-    verification_url = generate_onfido_verification_url(guild_id, ctx.author.id, server_config.role_id)
+    verification_url = await generate_onfido_verification_url(guild_id, ctx.author.id, server_config.role_id)
     
     if not verification_url:
         await ctx.send("Failed to initiate verification process. Please try again later or contact support.")
@@ -224,7 +326,6 @@ async def verify(ctx):
     track_command_usage(guild_id, ctx.author.id, "verify")
     logging.info(f"Generated verification URL for user {ctx.author.id}: {verification_url}")
     await ctx.send(f"This server has {member_count} members. Click the link below to verify your age: {verification_url}")
-
 
 @bot.command()
 @commands.cooldown(1, COOLDOWN_PERIOD, BucketType.user)
@@ -315,44 +416,62 @@ async def ping(ctx):
 async def on_ready():
     logging.info(f'Bot is ready. Logged in as {bot.user}')
 
-def generate_onfido_verification_url(guild_id, user_id, role_id):
-    applicant_data = {
-        "first_name": "User",
-        "last_name": "Test",
-        "redirect_uri": REDIRECT_URI,
-        "applicant_id": f"{guild_id}-{user_id}-{role_id}"
-    }
-    
-    # Print the API token for debugging (Remove this after verifying)
-    logging.info(f"Using Onfido API token: {ONFIDO_API_TOKEN}")
-    
-    response = requests.post("https://api.onfido.com/v3/applicants", json=applicant_data, headers={"Authorization": f"Token token={ONFIDO_API_TOKEN}"})
-    
-    # Log the response for debugging
-    logging.info(f"Onfido API response (applicants): {response.json()}")
-    
-    if response.status_code != 201 or "id" not in response.json():
-        logging.error(f"Failed to create Onfido applicant: {response.json()}")
+async def generate_onfido_verification_url(guild_id, user_id, role_id, user_locale):
+    try:
+        # Convert Discord locale to country code
+        country_code = locale_to_country_code(user_locale)
+
+        # Create an applicant
+        applicant = onfido_api.create_applicant(
+            onfido.ApplicantBuilder(
+                first_name="Discord",
+                last_name="User",
+                external_id=f"{guild_id}-{user_id}-{role_id}",
+                location=onfido.LocationBuilder(
+                    country_of_residence=country_code
+                ),
+                consents=onfido.ConsentsBuilder(
+                    privacy_notices_read=True
+                )
+            )
+        )
+        
+        logging.info(f"Onfido API response (applicants): {applicant}")
+
+        # Create a check
+        check = onfido_api.create_check(
+            onfido.CheckBuilder(
+                applicant_id=applicant.id,
+                report_names=["identity_enhanced"],
+                consider=None,
+                async_=True
+            )
+        )
+        
+        logging.info(f"Onfido API response (checks): {check}")
+
+        # Generate SDK token
+        sdk_token = onfido_api.generate_sdk_token(
+            onfido.SdkTokenBuilder(
+                applicant_id=applicant.id,
+                referrer="*://*/*"
+            )
+        )
+
+        # Use the SDK token to create the verification URL
+        verification_url = f"https://id.onfido.com/start_iframe?sdk_token={sdk_token.token}"
+
+        return verification_url
+
+    except onfido.ApiException as e:
+        logging.error(f"Failed to create Onfido applicant or check: {e}")
+        logging.error(f"Response body: {e.body}")
+        return None
+    except Exception as e:
+        logging.error(f"Unexpected error in generate_onfido_verification_url: {e}")
         return None
 
-    applicant_id = response.json()["id"]
 
-    check_data = {
-        "applicant_id": applicant_id,
-        "report_names": ["identity_enhanced"]
-    }
-    response = requests.post("https://api.onfido.com/v3/checks", json=check_data, headers={"Authorization": f"Token token={ONFIDO_API_TOKEN}"})
-    
-    # Log the response for debugging
-    logging.info(f"Onfido API response (checks): {response.json()}")
-    
-    if response.status_code != 201 or "id" not in response.json():
-        logging.error(f"Failed to create Onfido check: {response.json()}")
-        return None
-
-    check_id = response.json()["id"]
-
-    return f"https://your_verification_page_url/start?check_id={check_id}&applicant_id={applicant_id}"
 
 
 
@@ -382,7 +501,7 @@ def start_verification():
     session['role_id'] = role_id
 
     authorization_url = (
-        f'https://api.onfido.com/v3/applicants?client_id={ONFIDO_API_TOKEN}&redirect_uri={REDIRECT_URI}&scope=openid'
+        f'https://api.us.onfido.com/v3.6/applicants?client_id={ONFIDO_API_TOKEN}&redirect_uri={REDIRECT_URI}&scope=openid'
     )
     return redirect(authorization_url)
 
