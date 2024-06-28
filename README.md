@@ -68,3 +68,7 @@ This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md
 ## Disclaimer
 
 This bot integrates with Onfido's identity verification service. Make sure to comply with all relevant data protection and privacy laws when using this bot.
+
+## License
+
+This project is proprietary software owned by [Your Company Name]. All rights reserved. See the [LICENSE.md](LICENSE.md) file for details.
