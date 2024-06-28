@@ -22,6 +22,7 @@ load_dotenv()
 # Retrieve environment variables
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 ONFIDO_API_TOKEN = os.getenv('ONFIDO_API_TOKEN')
+ONFIDO_WORKFLOW_ID = os.getenv('ONFIDO_WORKFLOW_ID')
 SECRET_KEY = os.getenv('SECRET_KEY')
 REDIRECT_URI = os.getenv('REDIRECT_URI')
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -328,6 +329,7 @@ async def generate_onfido_verification_url(guild_id, user_id, role_id, user_loca
                 applicant_id=applicant.id,
                 report_names=["identity_enhanced"],
                 consider=None,
+                # workflow_id=ONFIDO_WORKFLOW_ID,
                 async_=True
             )
         )
@@ -338,7 +340,8 @@ async def generate_onfido_verification_url(guild_id, user_id, role_id, user_loca
         sdk_token = onfido_api.generate_sdk_token(
             onfido.SdkTokenBuilder(
                 applicant_id=applicant.id,
-                referrer="*://*/*"
+                referrer="*://*/*",
+                # workflow_id=ONFIDO_WORKFLOW_ID
             )
         )
 
@@ -460,65 +463,6 @@ async def ping(ctx):
 @bot.event
 async def on_ready():
     logging.info(f'Bot is ready. Logged in as {bot.user}')
-
-async def generate_onfido_verification_url(guild_id, user_id, role_id, user_locale):
-    try:
-        # Convert Discord locale to country code
-        country_code = locale_to_country_code(user_locale)
-
-        # Create an applicant
-        applicant = onfido_api.create_applicant(
-            onfido.ApplicantBuilder(
-                first_name="Discord",
-                last_name="User",
-                external_id=f"{guild_id}-{user_id}-{role_id}",
-                location=onfido.LocationBuilder(
-                    country_of_residence=country_code
-                ),
-                consents=onfido.ConsentsBuilder(
-                    privacy_notices_read=True
-                )
-            )
-        )
-        
-        logging.info(f"Onfido API response (applicants): {applicant}")
-
-        # Create a check
-        check = onfido_api.create_check(
-            onfido.CheckBuilder(
-                applicant_id=applicant.id,
-                report_names=["identity_enhanced"],
-                consider=None,
-                async_=True
-            )
-        )
-        
-        logging.info(f"Onfido API response (checks): {check}")
-
-        # Generate SDK token
-        sdk_token = onfido_api.generate_sdk_token(
-            onfido.SdkTokenBuilder(
-                applicant_id=applicant.id,
-                referrer="*://*/*"
-            )
-        )
-
-        # Use the SDK token to create the verification URL
-        verification_url = f"https://id.onfido.com/start_iframe?sdk_token={sdk_token.token}"
-
-        return verification_url
-
-    except onfido.ApiException as e:
-        logging.error(f"Failed to create Onfido applicant or check: {e}")
-        logging.error(f"Response body: {e.body}")
-        return None
-    except Exception as e:
-        logging.error(f"Unexpected error in generate_onfido_verification_url: {e}")
-        return None
-
-
-
-
 
 @app.route('/callback', methods=['POST'])
 def callback():
