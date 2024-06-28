@@ -1,6 +1,6 @@
 # Proprietary License
 
-Copyright (c) [Year] Esatto Technologies LLC. All rights reserved.
+Copyright (c) 2024 Esatto Technologies LLC. All rights reserved.
 
 This software and associated documentation files (the "Software") are the proprietary property of Esatto Technologies LLC and are protected by copyright law and international treaty provisions. Unauthorized reproduction, distribution, or modification of this Software, or any portion of it, may result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under law.
 
