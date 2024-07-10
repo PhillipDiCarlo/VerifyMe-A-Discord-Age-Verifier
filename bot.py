@@ -1,6 +1,5 @@
 import discord
-from discord.ext import commands
-from discord.ext.commands import BucketType
+from discord import app_commands
 from flask import Flask, request, redirect, session, jsonify
 import os
 from os import environ
@@ -33,14 +32,17 @@ db_session = Session()
 
 # Initialize the Discord bot with intents
 intents = discord.Intents.default()
-intents.messages = True
-intents.guilds = True
-intents.members = True
 intents.message_content = True
-intents.presences = True
-intents.application_commands = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+class MyBot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+
+    async def setup_hook(self):
+        await self.tree.sync()
+
+bot = MyBot()
 
 # Flask app setup
 app = Flask(__name__)
@@ -208,122 +210,121 @@ async def generate_stripe_verification_url(guild_id, user_id, role_id, channel_i
         logging.error(f"Stripe API error: {str(e)}")
         return None
 
-@bot.command()
-@commands.cooldown(1, COOLDOWN_PERIOD, BucketType.user)
-async def verify(ctx):
-    logging.info(f"Received !verify command from user {ctx.author} in guild {ctx.guild}")
-    guild_id = str(ctx.guild.id)
-    member_count = ctx.guild.member_count
+@bot.tree.command(name="verify", description="Start the verification process")
+async def verify(interaction: discord.Interaction):
+    logging.info(f"Received /verify command from user {interaction.user} in guild {interaction.guild}")
+    guild_id = str(interaction.guild_id)
+    member_count = interaction.guild.member_count
 
     required_tier = get_required_tier(member_count)
     server_config = get_server_config(guild_id)
 
     if not server_config:
-        await ctx.send("No configuration found for this server. Please ask an admin to set up the server using `!set_role @Role`.")
+        await interaction.response.send_message("No configuration found for this server. Please ask an admin to set up the server using `/set_role`.", ephemeral=True)
         return
 
     if not server_config.subscription_status:
         logging.warning(f"No active subscription for guild {guild_id}")
-        await ctx.send("This server does not have an active subscription.")
+        await interaction.response.send_message("This server does not have an active subscription.", ephemeral=True)
         return
 
     subscribed_tier = server_config.tier
 
     if subscribed_tier not in tier_requirements:
         logging.warning(f"Invalid subscription tier {subscribed_tier} for guild {guild_id}")
-        await ctx.send("Invalid subscription tier configured for this server. Please ask an admin to correctly subscribe to the appropriate tier.")
+        await interaction.response.send_message("Invalid subscription tier configured for this server. Please ask an admin to correctly subscribe to the appropriate tier.", ephemeral=True)
         return
 
     if tier_requirements[subscribed_tier] < tier_requirements[required_tier]:
         logging.warning(f"Subscription tier {subscribed_tier} does not cover {member_count} members")
-        await ctx.send(f"This server's subscription ({subscribed_tier}) does not cover {member_count} members. Please upgrade to {required_tier}.")
+        await interaction.response.send_message(f"This server's subscription ({subscribed_tier}) does not cover {member_count} members. Please upgrade to {required_tier}.", ephemeral=True)
         return
 
-    if is_user_in_cooldown(ctx.author.id):
-        logging.info(f"User {ctx.author.id} is in cooldown period")
-        await ctx.send(f"You are currently in a cooldown period. Please wait before attempting to verify again.")
+    if is_user_in_cooldown(interaction.user.id):
+        logging.info(f"User {interaction.user.id} is in cooldown period")
+        await interaction.response.send_message(f"You are currently in a cooldown period. Please wait before attempting to verify again.", ephemeral=True)
         return
 
-    user = get_user_verification_status(ctx.author.id)
+    user = get_user_verification_status(interaction.user.id)
     if user and user.verification_status:
-        logging.info(f"User {ctx.author.id} is already verified")
-        await assign_role(guild_id, ctx.author.id, server_config.role_id)
-        await ctx.send("You are already verified. Role has been assigned.")
+        logging.info(f"User {interaction.user.id} is already verified")
+        await assign_role(guild_id, interaction.user.id, server_config.role_id)
+        await interaction.response.send_message("You are already verified. Role has been assigned.", ephemeral=True)
         return
 
     verification_url = await generate_stripe_verification_url(
         guild_id,
-        ctx.author.id,
+        interaction.user.id,
         server_config.role_id,
-        str(ctx.channel.id))
+        str(interaction.channel_id))
     
     if not verification_url:
-        await ctx.send("Failed to initiate verification process. Please try again later or contact support.")
+        await interaction.response.send_message("Failed to initiate verification process. Please try again later or contact support.", ephemeral=True)
         return
 
-    track_verification_attempt(ctx.author.id)
-    track_command_usage(guild_id, ctx.author.id, "verify")
-    logging.info(f"Generated verification URL for user {ctx.author.id}: {verification_url}")
-    await ctx.send(f"Click the link below to verify your age: {verification_url}", ephemeral=True)
+    track_verification_attempt(interaction.user.id)
+    track_command_usage(guild_id, interaction.user.id, "verify")
+    logging.info(f"Generated verification URL for user {interaction.user.id}: {verification_url}")
+    await interaction.response.send_message(f"Click the link below to verify your age: {verification_url}", ephemeral=True)
 
-@bot.command()
-@commands.cooldown(1, COOLDOWN_PERIOD, BucketType.user)
-async def reverify(ctx):
-    guild_id = str(ctx.guild.id)
-    member_count = ctx.guild.member_count
+@bot.tree.command(name="reverify", description="Start the reverification process")
+async def reverify(interaction: discord.Interaction):
+    guild_id = str(interaction.guild_id)
+    member_count = interaction.guild.member_count
 
     required_tier = get_required_tier(member_count)
     server_config = get_server_config(guild_id)
 
     if not server_config:
-        await ctx.send("No configuration found for this server. Please ask an admin to set up the server using `!set_role @Role`.")
+        await interaction.response.send_message("No configuration found for this server. Please ask an admin to set up the server using `/set_role`.", ephemeral=True)
         return
 
     if not server_config.subscription_status:
-        await ctx.send("This server does not have an active subscription.")
+        await interaction.response.send_message("This server does not have an active subscription.", ephemeral=True)
         return
 
     subscribed_tier = server_config.tier
 
     if subscribed_tier not in tier_requirements:
-        await ctx.send("Invalid subscription tier configured for this server. Please ask an admin to correctly subscribe to the appropriate tier.")
+        await interaction.response.send_message("Invalid subscription tier configured for this server. Please ask an admin to correctly subscribe to the appropriate tier.", ephemeral=True)
         return
 
     if tier_requirements[subscribed_tier] < tier_requirements[required_tier]:
-        await ctx.send(f"This server's subscription ({subscribed_tier}) does not cover {member_count} members. Please upgrade to {required_tier}.")
+        await interaction.response.send_message(f"This server's subscription ({subscribed_tier}) does not cover {member_count} members. Please upgrade to {required_tier}.", ephemeral=True)
         return
 
-    if is_user_in_cooldown(ctx.author.id):
-        await ctx.send(f"You are currently in a cooldown period. Please wait before attempting to verify again.")
+    if is_user_in_cooldown(interaction.user.id):
+        await interaction.response.send_message(f"You are currently in a cooldown period. Please wait before attempting to verify again.", ephemeral=True)
         return
 
     verification_url = await generate_stripe_verification_url(
         guild_id,
-        ctx.author.id,
+        interaction.user.id,
         server_config.role_id,
-        str(ctx.channel.id))
+        str(interaction.channel_id))
 
     if not verification_url:
-        await ctx.send("Failed to initiate verification process. Please try again later or contact support.")
+        await interaction.response.send_message("Failed to initiate verification process. Please try again later or contact support.", ephemeral=True)
         return
 
-    track_verification_attempt(ctx.author.id)
-    track_command_usage(guild_id, ctx.author.id, "reverify")
-    await ctx.send(f"Click the link below to verify your age: {verification_url}", ephemeral=True)
+    track_verification_attempt(interaction.user.id)
+    track_command_usage(guild_id, interaction.user.id, "reverify")
+    await interaction.response.send_message(f"Click the link below to verify your age: {verification_url}", ephemeral=True)
 
-@bot.command()
-async def set_role(ctx, role: discord.Role):
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.send("You do not have permission to use this command.")
+@bot.tree.command(name="set_role", description="Set the role for verified users")
+@app_commands.describe(role="The role to assign to verified users")
+async def set_role(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
 
-    guild_id = str(ctx.guild.id)
+    guild_id = str(interaction.guild_id)
     server_config = get_server_config(guild_id)
 
     if not server_config:
         db_session.execute(servers.insert().values(
             server_id=guild_id,
-            owner_id=str(ctx.guild.owner_id),
+            owner_id=str(interaction.guild.owner_id),
             role_id=str(role.id),
             subscription_status=True  # Assuming subscription is active for testing
         ))
@@ -332,38 +333,43 @@ async def set_role(ctx, role: discord.Role):
         server_config.role_id = str(role.id)
         db_session.commit()
 
-    await ctx.send(f"Role for verification set to: {role.name}")
+    await interaction.response.send_message(f"Role for verification set to: {role.name}", ephemeral=True)
 
-@bot.command()
-# TODO: REMOVE AFTER TESTING
-async def set_subscription(ctx, tier: str):
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.send("You do not have permission to use this command.")
+@bot.tree.command(name="set_subscription", description="Set the subscription tier for the server")
+@app_commands.describe(tier="The subscription tier to set")
+async def set_subscription(interaction: discord.Interaction, tier: str):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
 
-    guild_id = str(ctx.guild.id)
+    guild_id = str(interaction.guild_id)
     server_config = get_server_config(guild_id)
 
     if not server_config:
-        await ctx.send("This server does not have an active subscription.")
+        await interaction.response.send_message("This server does not have an active subscription.", ephemeral=True)
         return
 
     if tier not in tier_requirements:
-        await ctx.send(f"Invalid tier. Available tiers: {', '.join(tier_requirements.keys())}")
+        await interaction.response.send_message(f"Invalid tier. Available tiers: {', '.join(tier_requirements.keys())}", ephemeral=True)
         return
 
     server_config.tier = tier
     db_session.commit()
 
-    await ctx.send(f"Subscription tier set to: {tier}")
+    await interaction.response.send_message(f"Subscription tier set to: {tier}", ephemeral=True)
 
-@bot.command()
-async def ping(ctx):
-    await ctx.send("Pong!", ephemeral=True)
+@bot.tree.command(name="ping", description="Check if the bot is responsive")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message("Pong!", ephemeral=True)
 
 @bot.event
 async def on_ready():
     logging.info(f'Bot is ready. Logged in as {bot.user}')
+    try:
+        synced = await bot.tree.sync()
+        logging.info(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        logging.error(f"Failed to sync commands: {e}")
 
 @app.route('/stripe_webhook', methods=['POST'])
 def stripe_webhook():
@@ -376,6 +382,8 @@ def stripe_webhook():
         )
     except ValueError as e:
         return 'Invalid payload', 400
+    except stripe.error.SignatureVerificationError as e:
+        return
     except stripe.error.SignatureVerificationError as e:
         return 'Invalid signature', 400
 
@@ -391,11 +399,12 @@ def stripe_webhook():
         loop.run_until_complete(assign_role(guild_id, user_id, role_id))
         update_user_verification_status(user_id, True)
         
+        return 'Verification successful, role assigned!', 200
     elif event['type'] == 'identity.verification_session.canceled':
         session = event['data']['object']
         guild_id = session['metadata']['guild_id']
         user_id = session['metadata']['user_id']
-        channel_id = session['metadata']['channel_id']  # Make sure to include this in your metadata when creating the session
+        channel_id = session['metadata']['channel_id']
         
         # Get the Discord user
         guild = bot.get_guild(int(guild_id))
@@ -420,7 +429,6 @@ def run_coroutine_in_new_loop(coroutine):
     asyncio.set_event_loop(loop)
     return loop.run_until_complete(coroutine)
 
-
 @app.route('/analytics')
 def analytics():
     result = db_session.query(command_usage).all()
@@ -432,4 +440,4 @@ def run_flask():
 
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
-    asyncio.run(bot.start(DISCORD_BOT_TOKEN))
+    bot.run(DISCORD_BOT_TOKEN)
