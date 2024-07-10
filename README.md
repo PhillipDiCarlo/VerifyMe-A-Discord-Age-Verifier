@@ -14,7 +14,7 @@ This Discord bot provides age verification functionality for Discord servers usi
 ## Prerequisites
 - Python 3.7+
 - Discord Bot Token
-- Onfido API Token
+- Stripe API Keys
 - PostgreSQL database
 
 ## Installation
@@ -33,7 +33,9 @@ This Discord bot provides age verification functionality for Discord servers usi
 3. Set up your environment variables in a `.env` file:
    ```
    DISCORD_BOT_TOKEN=your_discord_bot_token
-   ONFIDO_API_TOKEN=your_onfido_api_token
+   STRIPE_SECRET_KEY=your_stripe_secret_key
+   STRIPE_PUBLISHABLE_KEY=your_stripe_publishable_key
+   STRIPE_WEBHOOK_SECRET=your_stripe_webhook_secret
    SECRET_KEY=your_secret_key
    REDIRECT_URI=your_redirect_uri
    DATABASE_URL=your_postgresql_database_url
@@ -53,7 +55,7 @@ This Discord bot provides age verification functionality for Discord servers usi
    - `!set_subscription [tier]`: (Admin only) Sets the subscription tier for the server
 
 ## Configuration
-
+- Set up a Stripe webhook in your Stripe dashboard to send 'identity.verification_session.verified' events to your `/stripe_webhook` endpoint.
 - Modify the `tier_requirements` dictionary in the code to adjust the member count limits for each subscription tier.
 - Update the `COOLDOWN_PERIOD` constant to change the cooldown duration between verification attempts.
 
