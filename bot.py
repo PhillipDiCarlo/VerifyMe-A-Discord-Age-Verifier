@@ -1,3 +1,7 @@
+# TODO: Program hangs when after grabbing the link to verify
+
+
+
 import discord
 from discord import app_commands
 from flask import Flask, request, redirect, session, jsonify
@@ -19,8 +23,8 @@ load_dotenv()
 
 # Retrieve environment variables
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
-STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET')
+STRIPE_SECRET_KEY = os.getenv('TEST_STRIPE_SECRET_KEY')
+STRIPE_WEBHOOK_SECRET = os.getenv('TEST_STRIPE_WEBHOOK_SECRET')
 SECRET_KEY = os.getenv('SECRET_KEY')
 REDIRECT_URI = os.getenv('REDIRECT_URI')
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -235,7 +239,8 @@ async def generate_stripe_verification_url(guild_id, user_id, role_id, channel_i
             }
         )
         logging.info(f"Created verification session with metadata: {verification_session.metadata}")
-        return verification_session.url
+        logging.info(f"URL: {verification_session.url}")
+        return verification_session.url # TODO: REAL api keys get hung up here
     
     except stripe.error.StripeError as e:
         logging.error(f"Stripe API error: {str(e)}")
@@ -327,7 +332,7 @@ async def verify(interaction: discord.Interaction):
     except Exception as e:
         logging.error(f"Unexpected error in verify command: {str(e)}")
         await interaction.response.send_message("An unexpected error occurred. Please try again later or contact support.", ephemeral=True)
-        
+
 
 @bot.tree.command(name="reverify", description="Start the reverification process")
 async def reverify(interaction: discord.Interaction):
