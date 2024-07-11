@@ -1,7 +1,3 @@
-# TODO: Program hangs when after grabbing the link to verify
-
-
-
 import discord
 from discord import app_commands
 from flask import Flask, request, redirect, session, jsonify
@@ -15,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 import threading
 import logging
 from dotenv import load_dotenv
+import pika
+import json
 import stripe
 from contextlib import contextmanager
 
@@ -23,11 +21,23 @@ load_dotenv()
 
 # Retrieve environment variables
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-STRIPE_SECRET_KEY = os.getenv('TEST_STRIPE_SECRET_KEY')
-STRIPE_WEBHOOK_SECRET = os.getenv('TEST_STRIPE_WEBHOOK_SECRET')
+STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
 SECRET_KEY = os.getenv('SECRET_KEY')
 REDIRECT_URI = os.getenv('REDIRECT_URI')
 DATABASE_URL = os.getenv('DATABASE_URL')
+
+# RabbitMQ Configuration
+RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
+RABBITMQ_PORT = int(os.getenv('RABBITMQ_PORT', 5672))
+RABBITMQ_USERNAME = os.getenv('RABBITMQ_USERNAME', 'guest')
+RABBITMQ_PASSWORD = os.getenv('RABBITMQ_PASSWORD', 'guest')
+RABBITMQ_VHOST = os.getenv('RABBITMQ_VHOST', '/')
+RABBITMQ_QUEUE_NAME = os.getenv('RABBITMQ_QUEUE_NAME', 'verification_results')
+
+# Construct the RabbitMQ URL
+RABBITMQ_URL = f"amqp://{RABBITMQ_USERNAME}:{RABBITMQ_PASSWORD}@{RABBITMQ_HOST}:{RABBITMQ_PORT}/{RABBITMQ_VHOST}"
+
+# Use RABBITMQ_URL in your connection setup
 
 # Database setup
 engine = create_engine(DATABASE_URL)
@@ -94,14 +104,6 @@ class CommandUsage(Base):
     command = Column(String(50), nullable=False)
     timestamp = Column(DateTime(timezone=True), nullable=False)
 
-class VerificationLog(Base):
-    __tablename__ = 'verification_logs'
-    id = Column(Integer, primary_key=True)
-    guild_id = Column(String(30), nullable=False)
-    user_id = Column(String(30), nullable=False)
-    action = Column(String(50), nullable=False)
-    timestamp = Column(DateTime(timezone=True), nullable=False)
-
 # Create tables
 Base.metadata.create_all(engine)
 
@@ -109,17 +111,12 @@ Base.metadata.create_all(engine)
 def session_scope():
     session = Session()
     try:
-        print("Starting new database session")  # Print statement
         yield session
-        print("About to commit changes to database")  # Print statement
         session.commit()
-        print("Committed changes to database")  # Print statement
-    except Exception as e:
-        print(f"Error in database session: {str(e)}")  # Print statement
+    except:
         session.rollback()
         raise
     finally:
-        print("Closing database session")  # Print statement
         session.close()
 
 def get_required_tier(member_count):
@@ -148,50 +145,18 @@ def update_user_verification_status(discord_id, status):
         if user:
             user.verification_status = status
 
-import time
-
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy import create_engine
-from sqlalchemy.exc import SQLAlchemyError
-from contextlib import contextmanager
-import threading
-
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
 def track_verification_attempt(discord_id):
-    print(f"Starting track_verification_attempt for discord_id: {discord_id}")
-    
-    def db_operation():
-        try:
-            with SessionLocal() as session:
-                user = session.query(User).filter_by(discord_id=str(discord_id)).first()
-                if user:
-                    print(f"Updating existing user: {user.discord_id}")
-                    user.last_verification_attempt = datetime.now(timezone.utc)
-                else:
-                    print(f"Creating new user for discord_id: {discord_id}")
-                    new_user = User(
-                        discord_id=str(discord_id),
-                        verification_status=False,
-                        last_verification_attempt=datetime.now(timezone.utc)
-                    )
-                    session.add(new_user)
-                session.commit()
-            print("Completed track_verification_attempt")
-        except SQLAlchemyError as e:
-            print(f"Database error in track_verification_attempt: {str(e)}")
-        except Exception as e:
-            print(f"Unexpected error in track_verification_attempt: {str(e)}")
-
-    thread = threading.Thread(target=db_operation)
-    thread.start()
-    thread.join(timeout=5)  # Wait for 5 seconds
-
-    if thread.is_alive():
-        print("Database operation timed out")
-        return False
-    return True
+    with session_scope() as session:
+        user = session.query(User).filter_by(discord_id=str(discord_id)).first()
+        if user:
+            user.last_verification_attempt = datetime.now(timezone.utc)
+        else:
+            new_user = User(
+                discord_id=str(discord_id),
+                verification_status=False,
+                last_verification_attempt=datetime.now(timezone.utc)
+            )
+            session.add(new_user)
 
 def track_command_usage(server_id, user_id, command):
     with session_scope() as session:
@@ -206,36 +171,10 @@ def track_command_usage(server_id, user_id, command):
 def is_user_in_cooldown(discord_id):
     with session_scope() as session:
         user = session.query(User).filter_by(discord_id=str(discord_id)).first()
-        logging.info(f"Checking cooldown for user {discord_id}")
-        
         if user and user.last_verification_attempt:
-            logging.info(f"Last verification attempt: {user.last_verification_attempt}")
-            
             cooldown_end = user.last_verification_attempt + timedelta(seconds=COOLDOWN_PERIOD)
-            current_time = datetime.now(timezone.utc)
-            
-            logging.info(f"Cooldown end: {cooldown_end}")
-            logging.info(f"Current time: {current_time}")
-            
-            if current_time < cooldown_end:
-                logging.info("User is in cooldown")
-                return True
-            else:
-                logging.info("User is not in cooldown")
-                return False
-        else:
-            logging.info("No previous verification attempt found")
-            return False
-
-# Check if server meets the tier requirement
-def check_tier_requirements(guild):
-    server_config = get_server_config(guild.id)
-    if server_config:
-        member_count = guild.member_count
-        tier_limit = tier_requirements[server_config.tier]
-        if member_count > tier_limit:
-            return False, tier_limit
-    return True, None
+            return datetime.now(timezone.utc) < cooldown_end
+    return False
 
 async def assign_role(guild_id, user_id, role_id):
     guild = bot.get_guild(int(guild_id))
@@ -244,30 +183,10 @@ async def assign_role(guild_id, user_id, role_id):
     if member and role:
         await member.add_roles(role)
 
-def log_verification_action(guild_id, user_id, action):
-    with session_scope() as session:
-        new_log = VerificationLog(
-            guild_id=str(guild_id),
-            user_id=str(user_id),
-            action=action,
-            timestamp=datetime.now(timezone.utc)
-        )
-        session.add(new_log)
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-
 async def generate_stripe_verification_url(guild_id, user_id, role_id, channel_id):
     try:
         verification_session = stripe.identity.VerificationSession.create(
             type='document',
-            options={
-                'document': {
-                    'require_id_number': False,
-                    'require_live_capture': True,
-                    'require_matching_selfie': True,
-                },
-            },
             metadata={
                 'guild_id': str(guild_id),
                 'user_id': str(user_id),
@@ -275,16 +194,68 @@ async def generate_stripe_verification_url(guild_id, user_id, role_id, channel_i
                 'channel_id': str(channel_id)
             }
         )
-        logging.info(f"Created verification session with metadata: {verification_session.metadata}")
-        logging.info(f"URL: {verification_session.url}")
-        return verification_session.url # TODO: REAL api keys get hung up here
-    
+        return verification_session.url
     except stripe.error.StripeError as e:
         logging.error(f"Stripe API error: {str(e)}")
         return None
 
+async def process_verification_result(message):
+    data = json.loads(message)
+    if data['type'] == 'verification_verified':
+        guild_id = data['guild_id']
+        user_id = data['user_id']
+        role_id = data['role_id']
+        await assign_role(guild_id, user_id, role_id)
+        update_user_verification_status(user_id, True)
+    elif data['type'] == 'verification_canceled':
+        guild_id = data['guild_id']
+        user_id = data['user_id']
+        channel_id = data['channel_id']
+        channel = bot.get_channel(int(channel_id))
+        if channel:
+            await channel.send(f"Verification canceled for user <@{user_id}>")
+
+async def consume_queue():
+    connection = await asyncio.get_event_loop().run_in_executor(
+        None, pika.BlockingConnection, pika.URLParameters(RABBITMQ_URL)
+    )
+    channel = await asyncio.get_event_loop().run_in_executor(
+        None, connection.channel
+    )
+    await asyncio.get_event_loop().run_in_executor(
+        None, channel.queue_declare, RABBITMQ_QUEUE_NAME, durable=True
+    )
+
+    async def callback(ch, method, properties, body):
+        await process_verification_result(body)
+        await asyncio.get_event_loop().run_in_executor(
+            None, ch.basic_ack, method.delivery_tag
+        )
+
+    await asyncio.get_event_loop().run_in_executor(
+        None, channel.basic_consume, RABBITMQ_QUEUE_NAME, callback
+    )
+
+    print(' [*] Waiting for messages. To exit press CTRL+C')
+    await asyncio.get_event_loop().run_in_executor(
+        None, channel.start_consuming
+    )
+
+@bot.event
+async def on_ready():
+    print(f'Bot is ready. Logged in as {bot.user}')
+    bot.last_startup_time = datetime.now(timezone.utc)
+    bot.loop.create_task(consume_queue())
+    try:
+        synced = await bot.tree.sync()
+        logging.info(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        logging.error(f"Failed to sync commands: {e}")
+
 @bot.tree.command(name="verify", description="Start the age verification process")
 async def verify(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
     try:
         logging.info(f"Received /verify command from user {interaction.user.id} in guild {interaction.guild.id}")
         
@@ -292,10 +263,6 @@ async def verify(interaction: discord.Interaction):
         member_count = interaction.guild.member_count
 
         with session_scope() as session:
-            # Reset cooldown if it's the first attempt after bot startup
-            if not bot.last_startup_time:
-                bot.last_startup_time = datetime.now(timezone.utc)
-            
             user = session.query(User).filter_by(discord_id=str(interaction.user.id)).first()
             if user and user.last_verification_attempt:
                 if user.last_verification_attempt < bot.last_startup_time:
@@ -306,47 +273,44 @@ async def verify(interaction: discord.Interaction):
             server_config = session.query(Server).filter_by(server_id=guild_id).first()
 
             if not server_config:
-                await interaction.response.send_message("This server is not configured for verification. Please ask an admin to set up the server using `/set_role`.", ephemeral=True)
+                await interaction.followup.send("This server is not configured for verification. Please ask an admin to set up the server using `/set_role`.", ephemeral=True)
                 return
 
             if not server_config.role_id:
                 logging.warning(f"No verification role set for guild {guild_id}")
-                await interaction.response.send_message("The verification role has not been set for this server. Please ask an admin to set up the role using `/set_role`.", ephemeral=True)
+                await interaction.followup.send("The verification role has not been set for this server. Please ask an admin to set up the role using `/set_role`.", ephemeral=True)
                 return
 
-            # Check if the role still exists in the guild
             verification_role = interaction.guild.get_role(int(server_config.role_id))
             if not verification_role:
                 logging.warning(f"Verification role {server_config.role_id} not found in guild {guild_id}")
-                await interaction.response.send_message("The configured verification role no longer exists. Please ask an admin to set up the role again using `/set_role`.", ephemeral=True)
+                await interaction.followup.send("The configured verification role no longer exists. Please ask an admin to set up the role again using `/set_role`.", ephemeral=True)
                 return
 
             if not server_config.subscription_status:
                 logging.warning(f"No active subscription for guild {guild_id}")
-                await interaction.response.send_message("This server does not have an active verification subscription.", ephemeral=True)
+                await interaction.followup.send("This server does not have an active verification subscription.", ephemeral=True)
                 return
             
             subscribed_tier = server_config.tier
 
             if subscribed_tier not in tier_requirements:
                 logging.warning(f"Invalid subscription tier {subscribed_tier} for guild {guild_id}")
-                await interaction.response.send_message("Invalid verification tier configured for this server. Please ask an admin to update the subscription.", ephemeral=True)
+                await interaction.followup.send("Invalid verification tier configured for this server. Please ask an admin to update the subscription.", ephemeral=True)
                 return
 
             if tier_requirements[subscribed_tier] < tier_requirements[required_tier]:
                 logging.warning(f"Subscription tier {subscribed_tier} does not cover {member_count} members")
-                await interaction.response.send_message(f"This server's verification subscription ({subscribed_tier}) does not cover {member_count} members. Please ask an admin to upgrade to {required_tier}.", ephemeral=True)
+                await interaction.followup.send(f"This server's verification subscription ({subscribed_tier}) does not cover {member_count} members. Please ask an admin to upgrade to {required_tier}.", ephemeral=True)
                 return
 
             if is_user_in_cooldown(interaction.user.id):
-                logging.info(f"User {interaction.user.id} is in cooldown period")
-                await interaction.response.send_message(f"You're in a cooldown period. Please wait before attempting to verify again.", ephemeral=True)
+                await interaction.followup.send(f"You're in a cooldown period. Please wait before attempting to verify again.", ephemeral=True)
                 return
 
             if user and user.verification_status:
-                logging.info(f"User {interaction.user.id} is already verified")
                 await assign_role(guild_id, interaction.user.id, server_config.role_id)
-                await interaction.response.send_message("You are already verified. Your role has been assigned.", ephemeral=True)
+                await interaction.followup.send("You are already verified. Your role has been assigned.", ephemeral=True)
                 return
             
             verification_url = await generate_stripe_verification_url(
@@ -356,72 +320,17 @@ async def verify(interaction: discord.Interaction):
                 str(interaction.channel.id))
             
             if not verification_url:
-                logging.error(f"Failed to generate verification URL for user {interaction.user.id} in guild {guild_id}")
-                await interaction.response.send_message("Failed to initiate the verification process. Please try again later or contact support.", ephemeral=True)
+                await interaction.followup.send("Failed to initiate the verification process. Please try again later or contact support.", ephemeral=True)
                 return
 
-            # Use the non-blocking track_verification_attempt function
-            tracking_success = track_verification_attempt(interaction.user.id)
-            if not tracking_success:
-                logging.warning(f"Failed to track verification attempt for user {interaction.user.id}")
-
-            try:
-                track_command_usage(guild_id, interaction.user.id, "verify")
-            except Exception as db_error:
-                logging.error(f"Database error in track_command_usage: {str(db_error)}")
-
-            logging.info(f"Generated verification URL for user {interaction.user.id} in guild {guild_id}: {verification_url}")
-            await interaction.response.send_message(f"Click the link below to verify your age. This link is private and should not be shared:\n\n{verification_url}", ephemeral=True)
+            track_verification_attempt(interaction.user.id)
+            track_command_usage(guild_id, interaction.user.id, "verify")
+            
+            await interaction.followup.send(f"Click the link below to verify your age. This link is private and should not be shared:\n\n{verification_url}", ephemeral=True)
 
     except Exception as e:
         logging.error(f"Unexpected error in verify command: {str(e)}")
-        await interaction.response.send_message("An unexpected error occurred. Please try again later or contact support.", ephemeral=True)
-
-@bot.tree.command(name="reverify", description="Start the reverification process")
-async def reverify(interaction: discord.Interaction):
-    guild_id = str(interaction.guild.id)
-    member_count = interaction.guild.member_count
-
-    required_tier = get_required_tier(member_count)
-    server_config = get_server_config(guild_id)
-
-    if not server_config:
-        await interaction.response.send_message("No configuration found for this server. Please ask an admin to set up the server using `/set_role`.", ephemeral=True)
-        return
-
-    if not server_config.subscription_status:
-        await interaction.response.send_message("This server does not have an active subscription.", ephemeral=True)
-        return
-
-    subscribed_tier = server_config.tier
-
-    if subscribed_tier not in tier_requirements:
-        await interaction.response.send_message("Invalid subscription tier configured for this server. Please ask an admin to correctly subscribe to the appropriate tier.", ephemeral=True)
-        return
-
-    if tier_requirements[subscribed_tier] < tier_requirements[required_tier]:
-        await interaction.response.send_message(f"This server's subscription ({subscribed_tier}) does not cover {member_count} members. Please upgrade to {required_tier}.", ephemeral=True)
-        return
-
-    if is_user_in_cooldown(interaction.user.id):
-        await interaction.response.send_message(f"You are currently in a cooldown period. Please wait before attempting to verify again.", ephemeral=True)
-        return
-
-    log_verification_action(interaction.guild.id, interaction.user.id, "Started Reverification")
-
-    verification_url = await generate_stripe_verification_url(
-        guild_id,
-        interaction.user.id,
-        server_config.role_id,
-        str(interaction.channel.id))
-
-    if not verification_url:
-        await interaction.response.send_message("Failed to initiate verification process. Please try again later or contact support.", ephemeral=True)
-        return
-    
-    track_verification_attempt(interaction.user.id)
-    track_command_usage(guild_id, interaction.user.id, "reverify")
-    await interaction.response.send_message(f"Click the link below to verify your age: {verification_url}", ephemeral=True)
+        await interaction.followup.send("An unexpected error occurred. Please try again later or contact support.", ephemeral=True)
 
 @bot.tree.command(name="set_role", description="Set the role for verified users")
 @app_commands.describe(role="The role to assign to verified users")
@@ -435,7 +344,6 @@ async def set_role(interaction: discord.Interaction, role: discord.Role):
         server_config = session.query(Server).filter_by(server_id=guild_id).first()
 
         if not server_config:
-            # Create new server config
             new_server = Server(
                 server_id=guild_id,
                 owner_id=str(interaction.guild.owner_id),
@@ -444,7 +352,6 @@ async def set_role(interaction: discord.Interaction, role: discord.Role):
             )
             session.add(new_server)
         else:
-            # Update existing server config
             server_config.role_id = str(role.id)
 
     await interaction.response.send_message(f"Verification role set to: {role.name}", ephemeral=True)
@@ -524,7 +431,7 @@ async def verification_logs(interaction: discord.Interaction, limit: int = 10):
     guild_id = str(interaction.guild.id)
     
     with session_scope() as session:
-        logs = session.query(VerificationLog).filter_by(guild_id=guild_id).order_by(VerificationLog.timestamp.desc()).limit(limit).all()
+        logs = session.query(CommandUsage).filter_by(server_id=guild_id).order_by(CommandUsage.timestamp.desc()).limit(limit).all()
 
     if not logs:
         await interaction.response.send_message("No verification logs found for this server.", ephemeral=True)
@@ -535,89 +442,17 @@ async def verification_logs(interaction: discord.Interaction, limit: int = 10):
     for log in logs:
         user = interaction.guild.get_member(int(log.user_id))
         user_name = user.name if user else f"Unknown User ({log.user_id})"
-        embed.add_field(name=f"{log.action} - {log.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
+        embed.add_field(name=f"{log.command} - {log.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
                         value=f"User: {user_name}",
                         inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
-    
+
 @bot.tree.command(name="ping", description="Check if the bot is responsive")
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message("Pong!", ephemeral=True)
 
-@bot.event
-async def on_ready():
-    logging.info(f'Bot is ready. Logged in as {bot.user}')
-    bot.last_startup_time = datetime.now(timezone.utc)
-    try:
-        synced = await bot.tree.sync()
-        logging.info(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        logging.error(f"Failed to sync commands: {e}")
-
-@app.route('/stripe_webhook', methods=['POST'])
-def stripe_webhook():
-    payload = request.data
-    sig_header = request.headers.get('Stripe-Signature')
-
-    try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, STRIPE_WEBHOOK_SECRET
-        )
-    except ValueError as e:
-        logging.error(f"Invalid payload: {str(e)}")
-        return 'Invalid payload', 400
-    except stripe.error.SignatureVerificationError as e:
-        logging.error(f"Invalid signature: {str(e)}")
-        return 'Invalid signature', 400
-
-    logging.info(f"Received event type: {event['type']}")
-    logging.info(f"Event data: {event['data']}")
-
-    if event['type'] == 'identity.verification_session.verified':
-        handle_verification_verified(event['data']['object'])
-    elif event['type'] == 'identity.verification_session.canceled':
-        handle_verification_canceled(event['data']['object'])
-    else:
-        logging.info(f"Unhandled event type: {event['type']}")
-
-    return '', 200
-
-def handle_verification_verified(session):
-    metadata = session.get('metadata', {})
-    guild_id = metadata.get('guild_id')
-    user_id = metadata.get('user_id')
-    role_id = metadata.get('role_id')
-    
-    if guild_id and user_id and role_id:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(assign_role(guild_id, user_id, role_id))
-        update_user_verification_status(user_id, True)
-        logging.info(f"Verification successful, role assigned for user {user_id} in guild {guild_id}")
-    else:
-        logging.warning(f"Missing metadata in verified session. Metadata: {metadata}")
-
-def handle_verification_canceled(session):
-    metadata = session.get('metadata', {})
-    guild_id = metadata.get('guild_id')
-    user_id = metadata.get('user_id')
-    channel_id = metadata.get('channel_id')
-    
-    if guild_id and user_id and channel_id:
-        message = f"Verification canceled for user <@{user_id}>"
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(send_discord_message(channel_id, message))
-        logging.info(f"Cancellation message sent for user {user_id} in guild {guild_id}")
-    else:
-        logging.warning(f"Missing metadata in canceled session. Metadata: {metadata}")
-
-async def send_discord_message(channel_id, message):
-    channel = bot.get_channel(int(channel_id))
-    if channel:
-        await channel.send(message)
-
+# Flask routes
 @app.route('/analytics')
 def analytics():
     with session_scope() as session:
@@ -625,8 +460,11 @@ def analytics():
         analytics_data = [{"server_id": row.server_id, "user_id": row.user_id, "command": row.command, "timestamp": row.timestamp} for row in result]
     return jsonify(analytics_data)
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+
 def run_flask():
-    app.run(host='0.0.0.0', port=5431, ssl_context='adhoc')
+    app.run(host='0.0.0.0', port=5000)
 
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
