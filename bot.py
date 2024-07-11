@@ -109,12 +109,17 @@ Base.metadata.create_all(engine)
 def session_scope():
     session = Session()
     try:
+        print("Starting new database session")  # Print statement
         yield session
+        print("About to commit changes to database")  # Print statement
         session.commit()
-    except:
+        print("Committed changes to database")  # Print statement
+    except Exception as e:
+        print(f"Error in database session: {str(e)}")  # Print statement
         session.rollback()
         raise
     finally:
+        print("Closing database session")  # Print statement
         session.close()
 
 def get_required_tier(member_count):
@@ -143,18 +148,50 @@ def update_user_verification_status(discord_id, status):
         if user:
             user.verification_status = status
 
+import time
+
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
+from contextlib import contextmanager
+import threading
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 def track_verification_attempt(discord_id):
-    with session_scope() as session:
-        user = session.query(User).filter_by(discord_id=str(discord_id)).first()
-        if user:
-            user.last_verification_attempt = datetime.now(timezone.utc)
-        else:
-            new_user = User(
-                discord_id=str(discord_id),
-                verification_status=False,
-                last_verification_attempt=datetime.now(timezone.utc)
-            )
-            session.add(new_user)
+    print(f"Starting track_verification_attempt for discord_id: {discord_id}")
+    
+    def db_operation():
+        try:
+            with SessionLocal() as session:
+                user = session.query(User).filter_by(discord_id=str(discord_id)).first()
+                if user:
+                    print(f"Updating existing user: {user.discord_id}")
+                    user.last_verification_attempt = datetime.now(timezone.utc)
+                else:
+                    print(f"Creating new user for discord_id: {discord_id}")
+                    new_user = User(
+                        discord_id=str(discord_id),
+                        verification_status=False,
+                        last_verification_attempt=datetime.now(timezone.utc)
+                    )
+                    session.add(new_user)
+                session.commit()
+            print("Completed track_verification_attempt")
+        except SQLAlchemyError as e:
+            print(f"Database error in track_verification_attempt: {str(e)}")
+        except Exception as e:
+            print(f"Unexpected error in track_verification_attempt: {str(e)}")
+
+    thread = threading.Thread(target=db_operation)
+    thread.start()
+    thread.join(timeout=5)  # Wait for 5 seconds
+
+    if thread.is_alive():
+        print("Database operation timed out")
+        return False
+    return True
 
 def track_command_usage(server_id, user_id, command):
     with session_scope() as session:
@@ -312,7 +349,6 @@ async def verify(interaction: discord.Interaction):
                 await interaction.response.send_message("You are already verified. Your role has been assigned.", ephemeral=True)
                 return
             
-            log_verification_action(interaction.guild.id, interaction.user.id, "Started Verification")
             verification_url = await generate_stripe_verification_url(
                 guild_id,
                 interaction.user.id,
@@ -324,15 +360,22 @@ async def verify(interaction: discord.Interaction):
                 await interaction.response.send_message("Failed to initiate the verification process. Please try again later or contact support.", ephemeral=True)
                 return
 
-            track_verification_attempt(interaction.user.id)
-            track_command_usage(guild_id, interaction.user.id, "verify")
+            # Use the non-blocking track_verification_attempt function
+            tracking_success = track_verification_attempt(interaction.user.id)
+            if not tracking_success:
+                logging.warning(f"Failed to track verification attempt for user {interaction.user.id}")
+
+            try:
+                track_command_usage(guild_id, interaction.user.id, "verify")
+            except Exception as db_error:
+                logging.error(f"Database error in track_command_usage: {str(db_error)}")
+
             logging.info(f"Generated verification URL for user {interaction.user.id} in guild {guild_id}: {verification_url}")
             await interaction.response.send_message(f"Click the link below to verify your age. This link is private and should not be shared:\n\n{verification_url}", ephemeral=True)
 
     except Exception as e:
         logging.error(f"Unexpected error in verify command: {str(e)}")
         await interaction.response.send_message("An unexpected error occurred. Please try again later or contact support.", ephemeral=True)
-
 
 @bot.tree.command(name="reverify", description="Start the reverification process")
 async def reverify(interaction: discord.Interaction):
