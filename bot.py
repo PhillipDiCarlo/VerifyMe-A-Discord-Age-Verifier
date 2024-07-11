@@ -16,7 +16,7 @@ import json
 import stripe
 from contextlib import contextmanager
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
 # Retrieve environment variables
@@ -27,17 +27,19 @@ REDIRECT_URI = os.getenv('REDIRECT_URI')
 DATABASE_URL = os.getenv('DATABASE_URL')
 
 # RabbitMQ Configuration
-RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
+RABBITMQ_HOST = os.getenv('RABBITMQ_HOST')
 RABBITMQ_PORT = int(os.getenv('RABBITMQ_PORT', 5672))
-RABBITMQ_USERNAME = os.getenv('RABBITMQ_USERNAME', 'guest')
-RABBITMQ_PASSWORD = os.getenv('RABBITMQ_PASSWORD', 'guest')
+RABBITMQ_USERNAME = os.getenv('RABBITMQ_USERNAME')
+RABBITMQ_PASSWORD = os.getenv('RABBITMQ_PASSWORD')
 RABBITMQ_VHOST = os.getenv('RABBITMQ_VHOST', '/')
 RABBITMQ_QUEUE_NAME = os.getenv('RABBITMQ_QUEUE_NAME', 'verification_results')
 
-# Construct the RabbitMQ URL
-RABBITMQ_URL = f"amqp://{RABBITMQ_USERNAME}:{RABBITMQ_PASSWORD}@{RABBITMQ_HOST}:{RABBITMQ_PORT}/{RABBITMQ_VHOST}"
-
-# Use RABBITMQ_URL in your connection setup
+# Ensure all required environment variables are set
+required_env_vars = ['DISCORD_BOT_TOKEN', 'STRIPE_SECRET_KEY', 'DATABASE_URL', 
+                     'RABBITMQ_HOST', 'RABBITMQ_USERNAME', 'RABBITMQ_PASSWORD']
+missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+if missing_vars:
+    raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
 # Database setup
 engine = create_engine(DATABASE_URL)
@@ -106,6 +108,21 @@ class CommandUsage(Base):
 
 # Create tables
 Base.metadata.create_all(engine)
+
+# RabbitMQ setup
+credentials = pika.PlainCredentials(RABBITMQ_USERNAME, RABBITMQ_PASSWORD)
+parameters = pika.ConnectionParameters(
+    host=RABBITMQ_HOST,
+    port=RABBITMQ_PORT,
+    virtual_host=RABBITMQ_VHOST,
+    credentials=credentials
+)
+
+def get_rabbitmq_channel():
+    connection = pika.BlockingConnection(parameters)
+    channel = connection.channel()
+    channel.queue_declare(queue=RABBITMQ_QUEUE_NAME, durable=True)
+    return channel
 
 @contextmanager
 def session_scope():
@@ -217,7 +234,7 @@ async def process_verification_result(message):
 
 async def consume_queue():
     connection = await asyncio.get_event_loop().run_in_executor(
-        None, pika.BlockingConnection, pika.URLParameters(RABBITMQ_URL)
+        None, pika.BlockingConnection, parameters
     )
     channel = await asyncio.get_event_loop().run_in_executor(
         None, connection.channel
@@ -255,30 +272,23 @@ async def on_ready():
 @bot.tree.command(name="verify", description="Start the age verification process")
 async def verify(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    
+    logging.info(f"Received /verify command from user {interaction.user.id} in guild {interaction.guild.id}")
+
     try:
-        logging.info(f"Received /verify command from user {interaction.user.id} in guild {interaction.guild.id}")
-        
         guild_id = str(interaction.guild.id)
         member_count = interaction.guild.member_count
 
         with session_scope() as session:
             user = session.query(User).filter_by(discord_id=str(interaction.user.id)).first()
-            if user and user.last_verification_attempt:
-                if user.last_verification_attempt < bot.last_startup_time:
-                    logging.info(f"Resetting cooldown for user {interaction.user.id}")
-                    user.last_verification_attempt = None
+            if user and user.last_verification_attempt and user.last_verification_attempt < bot.last_startup_time:
+                logging.info(f"Resetting cooldown for user {interaction.user.id}")
+                user.last_verification_attempt = None
 
             required_tier = get_required_tier(member_count)
             server_config = session.query(Server).filter_by(server_id=guild_id).first()
 
-            if not server_config:
-                await interaction.followup.send("This server is not configured for verification. Please ask an admin to set up the server using `/set_role`.", ephemeral=True)
-                return
-
-            if not server_config.role_id:
-                logging.warning(f"No verification role set for guild {guild_id}")
-                await interaction.followup.send("The verification role has not been set for this server. Please ask an admin to set up the role using `/set_role`.", ephemeral=True)
+            if not server_config or not server_config.role_id or not server_config.subscription_status:
+                await send_error_response(interaction, server_config, guild_id)
                 return
 
             verification_role = interaction.guild.get_role(int(server_config.role_id))
@@ -287,21 +297,8 @@ async def verify(interaction: discord.Interaction):
                 await interaction.followup.send("The configured verification role no longer exists. Please ask an admin to set up the role again using `/set_role`.", ephemeral=True)
                 return
 
-            if not server_config.subscription_status:
-                logging.warning(f"No active subscription for guild {guild_id}")
-                await interaction.followup.send("This server does not have an active verification subscription.", ephemeral=True)
-                return
-            
             subscribed_tier = server_config.tier
-
-            if subscribed_tier not in tier_requirements:
-                logging.warning(f"Invalid subscription tier {subscribed_tier} for guild {guild_id}")
-                await interaction.followup.send("Invalid verification tier configured for this server. Please ask an admin to update the subscription.", ephemeral=True)
-                return
-
-            if tier_requirements[subscribed_tier] < tier_requirements[required_tier]:
-                logging.warning(f"Subscription tier {subscribed_tier} does not cover {member_count} members")
-                await interaction.followup.send(f"This server's verification subscription ({subscribed_tier}) does not cover {member_count} members. Please ask an admin to upgrade to {required_tier}.", ephemeral=True)
+            if not await validate_subscription(subscribed_tier, required_tier, member_count, interaction):
                 return
 
             if is_user_in_cooldown(interaction.user.id):
@@ -313,24 +310,41 @@ async def verify(interaction: discord.Interaction):
                 await interaction.followup.send("You are already verified. Your role has been assigned.", ephemeral=True)
                 return
             
-            verification_url = await generate_stripe_verification_url(
-                guild_id,
-                interaction.user.id,
-                server_config.role_id,
-                str(interaction.channel.id))
-            
+            verification_url = await generate_stripe_verification_url(guild_id, interaction.user.id, server_config.role_id, str(interaction.channel.id))
             if not verification_url:
                 await interaction.followup.send("Failed to initiate the verification process. Please try again later or contact support.", ephemeral=True)
                 return
 
             track_verification_attempt(interaction.user.id)
             track_command_usage(guild_id, interaction.user.id, "verify")
-            
             await interaction.followup.send(f"Click the link below to verify your age. This link is private and should not be shared:\n\n{verification_url}", ephemeral=True)
 
     except Exception as e:
         logging.error(f"Unexpected error in verify command: {str(e)}")
         await interaction.followup.send("An unexpected error occurred. Please try again later or contact support.", ephemeral=True)
+
+async def send_error_response(interaction, server_config, guild_id):
+    if not server_config:
+        await interaction.followup.send("This server is not configured for verification. Please ask an admin to set up the server using `/set_role`.", ephemeral=True)
+    elif not server_config.role_id:
+        logging.warning(f"No verification role set for guild {guild_id}")
+        await interaction.followup.send("The verification role has not been set for this server. Please ask an admin to set up the role using `/set_role`.", ephemeral=True)
+    elif not server_config.subscription_status:
+        logging.warning(f"No active subscription for guild {guild_id}")
+        await interaction.followup.send("This server does not have an active verification subscription.", ephemeral=True)
+
+async def validate_subscription(subscribed_tier, required_tier, member_count, interaction):
+    if subscribed_tier not in tier_requirements:
+        logging.warning(f"Invalid subscription tier {subscribed_tier}")
+        await interaction.followup.send("Invalid verification tier configured for this server. Please ask an admin to update the subscription.", ephemeral=True)
+        return False
+
+    if tier_requirements[subscribed_tier] < tier_requirements[required_tier]:
+        logging.warning(f"Subscription tier {subscribed_tier} does not cover {member_count} members")
+        await interaction.followup.send(f"This server's verification subscription ({subscribed_tier}) does not cover {member_count} members. Please ask an admin to upgrade to {required_tier}.", ephemeral=True)
+        return False
+    return True
+
 
 @bot.tree.command(name="set_role", description="Set the role for verified users")
 @app_commands.describe(role="The role to assign to verified users")
