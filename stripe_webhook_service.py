@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 from typing import Dict, Any
 from pika.exceptions import AMQPError
 from queue import Queue, Empty
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -18,6 +20,20 @@ logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Database configuration
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+
+# Define Users model
+class Users(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    discord_id = db.Column(db.String(50), nullable=False)
+    verification_status = db.Column(db.Boolean, default=False)
+    dob = db.Column(db.Date, nullable=True)
+    last_verification_attempt = db.Column(db.DateTime(timezone=True), nullable=False, default=datetime.now)
 
 # Stripe setup
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
@@ -106,6 +122,7 @@ def send_to_queue(message: Dict[str, Any], max_retries: int = 3) -> None:
 
 @app.route('/stripe_webhook', methods=['POST'])
 def stripe_webhook() -> tuple:
+    logger.info("Received a webhook from Stripe")
     payload = request.data
     sig_header = request.headers.get('Stripe-Signature')
 
@@ -129,25 +146,86 @@ def stripe_webhook() -> tuple:
 
 def handle_verification_verified(session: Dict[str, Any]) -> None:
     metadata = session.get('metadata', {})
+    guild_id = metadata.get('guild_id')
+    user_id = metadata.get('user_id')  # This is used as discord_id
+    role_id = metadata.get('role_id')
+    
+    if not user_id:
+        logger.error(f"Missing user_id in metadata: {metadata}")
+        return
+
+    birthdate = session['documents'][0]['details']['dob'] if 'documents' in session else None
+    verification_status = True
+
+    # Update user in the database
+    user = Users.query.filter_by(discord_id=user_id).first()
+    if user:
+        user.verification_status = verification_status
+        user.dob = birthdate
+        user.last_verification_attempt = datetime.now()
+        db.session.commit()
+        logger.info(f"User {user_id} marked as verified with birthdate {birthdate}")
+    else:
+        # Add new user if not found
+        new_user = Users(
+            discord_id=user_id,
+            verification_status=verification_status,
+            dob=birthdate,
+            last_verification_attempt=datetime.now()
+        )
+        db.session.add(new_user)
+        db.session.commit()
+        logger.info(f"New user {user_id} added and marked as verified with birthdate {birthdate}")
+
     message = {
         'type': 'verification_verified',
-        'guild_id': metadata.get('guild_id'),
-        'user_id': metadata.get('user_id'),
-        'role_id': metadata.get('role_id')
+        'guild_id': guild_id,
+        'user_id': user_id,
+        'role_id': role_id
     }
     send_to_queue(message)
-    logger.info(f"Verification successful for user {metadata.get('user_id')} in guild {metadata.get('guild_id')}")
+    logger.info(f"Verification successful for user {user_id} in guild {guild_id}")
 
 def handle_verification_canceled(session: Dict[str, Any]) -> None:
     metadata = session.get('metadata', {})
+    guild_id = metadata.get('guild_id')
+    user_id = metadata.get('user_id')  # This is used as discord_id
+    role_id = metadata.get('role_id')
+
+    if not user_id:
+        logger.error(f"Missing user_id in metadata: {metadata}")
+        return
+
+    verification_status = False
+
+    # Update user in the database
+    user = Users.query.filter_by(discord_id=user_id).first()
+    if user:
+        user.verification_status = verification_status
+        user.last_verification_attempt = datetime.now()
+        db.session.commit()
+        logger.info(f"User {user_id} verification attempt canceled")
+    else:
+        # Add new user if not found
+        new_user = Users(
+            discord_id=user_id,
+            verification_status=verification_status,
+            last_verification_attempt=datetime.now()
+        )
+        db.session.add(new_user)
+        db.session.commit()
+        logger.info(f"New user {user_id} added with verification attempt canceled")
+
     message = {
         'type': 'verification_canceled',
-        'guild_id': metadata.get('guild_id'),
-        'user_id': metadata.get('user_id'),
-        'channel_id': metadata.get('channel_id')
+        'guild_id': guild_id,
+        'user_id': user_id,
+        'role_id': role_id
     }
     send_to_queue(message)
-    logger.info(f"Verification canceled for user {metadata.get('user_id')} in guild {metadata.get('guild_id')}")
+    logger.info(f"Verification canceled for user {user_id} in guild {guild_id}")
 
 if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()  # Create database tables
     app.run(host='0.0.0.0', port=5431)
