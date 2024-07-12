@@ -155,9 +155,10 @@ def handle_verification_verified(session: Dict[str, Any]) -> None:
         return
 
     birthdate = session['documents'][0]['details']['dob'] if 'documents' in session else None
+    logger.info(f"Extracted birthdate: {birthdate}")
     verification_status = True
 
-    # Update user in the database
+    # Check if user exists and update, otherwise create a new user
     user = Users.query.filter_by(discord_id=user_id).first()
     if user:
         user.verification_status = verification_status
@@ -198,7 +199,7 @@ def handle_verification_canceled(session: Dict[str, Any]) -> None:
 
     verification_status = False
 
-    # Update user in the database
+    # Check if user exists and update, otherwise create a new user
     user = Users.query.filter_by(discord_id=user_id).first()
     if user:
         user.verification_status = verification_status
