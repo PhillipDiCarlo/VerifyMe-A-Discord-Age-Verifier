@@ -7,9 +7,11 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from typing import Dict, Any
 from pika.exceptions import AMQPError
-from queue import Queue, Empty
-from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Date
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 from datetime import datetime
+from contextlib import contextmanager
 
 # Load environment variables
 load_dotenv()
@@ -22,21 +24,25 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Database configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db = SQLAlchemy(app)
+DATABASE_URL = os.getenv('DATABASE_URL')
+engine = create_engine(DATABASE_URL)
+Base = declarative_base()
+Session = sessionmaker(bind=engine)
 
 # Define Users model
-class Users(db.Model):
+class User(Base):
     __tablename__ = 'users'
-    id = db.Column(db.Integer, primary_key=True)
-    discord_id = db.Column(db.String(50), nullable=False)
-    verification_status = db.Column(db.Boolean, default=False)
-    dob = db.Column(db.Date, nullable=True)
-    last_verification_attempt = db.Column(db.DateTime(timezone=True), nullable=False, default=datetime.now)
+    id = Column(Integer, primary_key=True)
+    discord_id = Column(String(50), nullable=False)
+    verification_status = Column(Boolean, default=False)
+    dob = Column(Date, nullable=True)
+    last_verification_attempt = Column(DateTime(timezone=True), nullable=False, default=datetime.now)
+
+# Create tables
+Base.metadata.create_all(engine)
 
 # Stripe setup
-stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
+stripe.api_key = os.getenv('STRIPE_RESTRICTED_SECRET_KEY')
 STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET')
 
 if not STRIPE_WEBHOOK_SECRET:
@@ -59,46 +65,32 @@ if missing_vars:
 # Convert RABBITMQ_PORT to integer after ensuring it is set
 RABBITMQ_PORT = int(RABBITMQ_PORT)
 
-# Create a connection pool
-class PikaConnectionPool:
-    def __init__(self, connection_params, max_size=10):
-        self.connection_params = connection_params
-        self.pool = Queue(max_size)
-        for _ in range(max_size):
-            self.pool.put(self._create_connection())
-
-    def _create_connection(self):
-        return pika.BlockingConnection(self.connection_params)
-
-    def acquire(self):
-        try:
-            return self.pool.get_nowait()
-        except Empty:
-            return self._create_connection()
-
-    def release(self, connection):
-        try:
-            self.pool.put_nowait(connection)
-        except Full:
-            connection.close()
-
+# RabbitMQ connection parameters
 credentials = pika.PlainCredentials(RABBITMQ_USERNAME, RABBITMQ_PASSWORD)
-connection_params = pika.ConnectionParameters(
+parameters = pika.ConnectionParameters(
     host=RABBITMQ_HOST,
     port=RABBITMQ_PORT,
     virtual_host=RABBITMQ_VHOST,
     credentials=credentials
 )
-connection_pool = PikaConnectionPool(connection_params)
+
+@contextmanager
+def session_scope():
+    session = Session()
+    try:
+        yield session
+        session.commit()
+    except:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 def send_to_queue(message: Dict[str, Any], max_retries: int = 3) -> None:
     retries = 0
-    backoff_time = 1  # Initial backoff time in seconds
-
     while retries < max_retries:
-        connection = None
         try:
-            connection = connection_pool.acquire()
+            connection = pika.BlockingConnection(parameters)
             channel = connection.channel()
             channel.queue_declare(queue=RABBITMQ_QUEUE_NAME, durable=True)
             channel.basic_publish(
@@ -107,17 +99,13 @@ def send_to_queue(message: Dict[str, Any], max_retries: int = 3) -> None:
                 body=json.dumps(message),
                 properties=pika.BasicProperties(delivery_mode=2)  # Make message persistent
             )
+            connection.close()
             logger.info("Message sent to queue successfully")
             return
         except AMQPError as e:
             logger.error(f"Failed to send message to queue: {str(e)}. Retry {retries + 1}/{max_retries}")
             retries += 1
-            time.sleep(backoff_time)
-            backoff_time *= 2  # Exponential backoff
-        finally:
-            if connection:
-                connection_pool.release(connection)
-
+    
     logger.error(f"Failed to send message to queue after {max_retries} attempts")
 
 @app.route('/stripe_webhook', methods=['POST'])
@@ -136,7 +124,7 @@ def stripe_webhook() -> tuple:
         return 'Invalid signature', 400
 
     if event['type'] == 'identity.verification_session.verified':
-        handle_verification_verified(event['data']['object'])
+        handle_verification_verified(event['data']['object']['id'])
     elif event['type'] == 'identity.verification_session.canceled':
         handle_verification_canceled(event['data']['object'])
     else:
@@ -144,39 +132,50 @@ def stripe_webhook() -> tuple:
 
     return '', 200
 
-def handle_verification_verified(session: Dict[str, Any]) -> None:
+def handle_verification_verified(session_id: str) -> None:
+    try:
+        session = stripe.identity.VerificationSession.retrieve(
+            session_id,
+            expand=['verified_outputs']
+        )
+        logger.info(f"Verification session: {session}")
+        logger.info(f"Verified outputs: {session.verified_outputs}")
+    except Exception as e:
+        logger.error(f"Failed to retrieve verification session: {str(e)}")
+        return
+
     metadata = session.get('metadata', {})
     guild_id = metadata.get('guild_id')
-    user_id = metadata.get('user_id')  # This is used as discord_id
+    user_id = metadata.get('user_id')
     role_id = metadata.get('role_id')
     
     if not user_id:
         logger.error(f"Missing user_id in metadata: {metadata}")
         return
 
-    birthdate = session['documents'][0]['details']['dob'] if 'documents' in session else None
+    dob = session.verified_outputs.get('dob', {})
+    birthdate = f"{dob.get('year', '')}-{dob.get('month', ''):02d}-{dob.get('day', ''):02d}"
     logger.info(f"Extracted birthdate: {birthdate}")
     verification_status = True
 
     # Check if user exists and update, otherwise create a new user
-    user = Users.query.filter_by(discord_id=user_id).first()
-    if user:
-        user.verification_status = verification_status
-        user.dob = birthdate
-        user.last_verification_attempt = datetime.now()
-        db.session.commit()
-        logger.info(f"User {user_id} marked as verified with birthdate {birthdate}")
-    else:
-        # Add new user if not found
-        new_user = Users(
-            discord_id=user_id,
-            verification_status=verification_status,
-            dob=birthdate,
-            last_verification_attempt=datetime.now()
-        )
-        db.session.add(new_user)
-        db.session.commit()
-        logger.info(f"New user {user_id} added and marked as verified with birthdate {birthdate}")
+    with session_scope() as db_session:
+        user = db_session.query(User).filter_by(discord_id=user_id).first()
+        if user:
+            user.verification_status = verification_status
+            user.dob = datetime.strptime(birthdate, "%Y-%m-%d").date()
+            user.last_verification_attempt = datetime.now()
+            logger.info(f"User {user_id} marked as verified with birthdate {birthdate}")
+        else:
+            # Add new user if not found
+            new_user = User(
+                discord_id=user_id,
+                verification_status=verification_status,
+                dob=datetime.strptime(birthdate, "%Y-%m-%d").date(),
+                last_verification_attempt=datetime.now()
+            )
+            db_session.add(new_user)
+            logger.info(f"New user {user_id} added and marked as verified with birthdate {birthdate}")
 
     message = {
         'type': 'verification_verified',
@@ -200,22 +199,21 @@ def handle_verification_canceled(session: Dict[str, Any]) -> None:
     verification_status = False
 
     # Check if user exists and update, otherwise create a new user
-    user = Users.query.filter_by(discord_id=user_id).first()
-    if user:
-        user.verification_status = verification_status
-        user.last_verification_attempt = datetime.now()
-        db.session.commit()
-        logger.info(f"User {user_id} verification attempt canceled")
-    else:
-        # Add new user if not found
-        new_user = Users(
-            discord_id=user_id,
-            verification_status=verification_status,
-            last_verification_attempt=datetime.now()
-        )
-        db.session.add(new_user)
-        db.session.commit()
-        logger.info(f"New user {user_id} added with verification attempt canceled")
+    with session_scope() as db_session:
+        user = db_session.query(User).filter_by(discord_id=user_id).first()
+        if user:
+            user.verification_status = verification_status
+            user.last_verification_attempt = datetime.now()
+            logger.info(f"User {user_id} verification attempt canceled")
+        else:
+            # Add new user if not found
+            new_user = User(
+                discord_id=user_id,
+                verification_status=verification_status,
+                last_verification_attempt=datetime.now()
+            )
+            db_session.add(new_user)
+            logger.info(f"New user {user_id} added with verification attempt canceled")
 
     message = {
         'type': 'verification_canceled',
@@ -227,6 +225,4 @@ def handle_verification_canceled(session: Dict[str, Any]) -> None:
     logger.info(f"Verification canceled for user {user_id} in guild {guild_id}")
 
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()  # Create database tables
     app.run(host='0.0.0.0', port=5431)

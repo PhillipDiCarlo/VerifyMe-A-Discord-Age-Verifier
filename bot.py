@@ -15,13 +15,14 @@ import pika
 import json
 import stripe
 from contextlib import contextmanager
+from functools import partial
 
 # Load environment variables
 load_dotenv()
 
 # Retrieve environment variables
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
+STRIPE_SECRET_KEY = os.getenv('STRIPE_RESTRICTED_SECRET_KEY')
 SECRET_KEY = os.getenv('SECRET_KEY')
 REDIRECT_URI = os.getenv('REDIRECT_URI')
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -156,11 +157,13 @@ def get_user_verification_status(discord_id):
     with session_scope() as session:
         return session.query(User).filter_by(discord_id=str(discord_id)).first()
 
-def update_user_verification_status(discord_id, status):
-    with session_scope() as session:
-        user = session.query(User).filter_by(discord_id=str(discord_id)).first()
-        if user:
-            user.verification_status = status
+async def update_user_verification_status(discord_id, status):
+    def db_update():
+        with session_scope() as session:
+            user = session.query(User).filter_by(discord_id=str(discord_id)).first()
+            if user:
+                user.verification_status = status
+    await main_loop.run_in_executor(None, db_update)
 
 def track_verification_attempt(discord_id):
     with session_scope() as session:
@@ -209,6 +212,13 @@ async def generate_stripe_verification_url(guild_id, user_id, role_id, channel_i
                 'user_id': str(user_id),
                 'role_id': str(role_id),
                 'channel_id': str(channel_id)
+            },
+            options={
+                'document': {
+                    'require_id_number': False,
+                    'require_live_capture': True,
+                    'require_matching_selfie': True
+                }
             }
         )
         return verification_session.url
@@ -223,7 +233,7 @@ async def process_verification_result(message):
         user_id = data['user_id']
         role_id = data['role_id']
         await assign_role(guild_id, user_id, role_id)
-        update_user_verification_status(user_id, True)
+        await update_user_verification_status(user_id, True)
     elif data['type'] == 'verification_canceled':
         guild_id = data['guild_id']
         user_id = data['user_id']
@@ -232,31 +242,32 @@ async def process_verification_result(message):
         if channel:
             await channel.send(f"Verification canceled for user <@{user_id}>")
 
+# Global variable to store the event loop
+main_loop = None
+
 async def consume_queue():
-    connection = await asyncio.get_event_loop().run_in_executor(
-        None, pika.BlockingConnection, parameters
-    )
-    channel = await asyncio.get_event_loop().run_in_executor(
-        None, connection.channel
-    )
-    await asyncio.get_event_loop().run_in_executor(
-        None, channel.queue_declare, RABBITMQ_QUEUE_NAME, durable=True
+    global main_loop
+    main_loop = asyncio.get_running_loop()
+
+    def sync_callback(ch, method, properties, body):
+        asyncio.run_coroutine_threadsafe(process_verification_result(body), main_loop)
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+
+    connection = await main_loop.run_in_executor(None, pika.BlockingConnection, parameters)
+    channel = await main_loop.run_in_executor(None, connection.channel)
+    
+    await main_loop.run_in_executor(
+        None, lambda: channel.queue_declare(queue=RABBITMQ_QUEUE_NAME, durable=True)
     )
 
-    async def callback(ch, method, properties, body):
-        await process_verification_result(body)
-        await asyncio.get_event_loop().run_in_executor(
-            None, ch.basic_ack, method.delivery_tag
-        )
-
-    await asyncio.get_event_loop().run_in_executor(
-        None, channel.basic_consume, RABBITMQ_QUEUE_NAME, callback
+    await main_loop.run_in_executor(
+        None, lambda: channel.basic_consume(queue=RABBITMQ_QUEUE_NAME, on_message_callback=sync_callback)
     )
 
     print(' [*] Waiting for messages. To exit press CTRL+C')
-    await asyncio.get_event_loop().run_in_executor(
-        None, channel.start_consuming
-    )
+    
+    # Run start_consuming in a separate thread
+    await main_loop.run_in_executor(None, channel.start_consuming)
 
 @bot.event
 async def on_ready():
