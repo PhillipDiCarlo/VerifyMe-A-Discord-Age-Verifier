@@ -17,7 +17,11 @@ load_dotenv()
 
 # Configure logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-logging.basicConfig(level=LOG_LEVEL)
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -99,10 +103,10 @@ def send_to_queue(message: Dict[str, Any], max_retries: int = 3) -> None:
                 properties=pika.BasicProperties(delivery_mode=2)  # Make message persistent
             )
             connection.close()
-            logger.info("Message sent to queue successfully")
+            logger.debug("Message sent to queue successfully")
             return
         except AMQPError as e:
-            logger.error(f"Failed to send message to queue: {str(e)}. Retry {retries + 1}/{max_retries}")
+            logger.warning(f"Failed to send message to queue: {str(e)}. Retry {retries + 1}/{max_retries}")
             retries += 1
     
     logger.error(f"Failed to send message to queue after {max_retries} attempts")
@@ -113,12 +117,12 @@ def stripe_webhook() -> tuple:
     payload = request.data.decode('utf-8')
     sig_header = request.headers.get('Stripe-Signature')
 
-    logger.info(f"Payload: {payload}")
-    logger.info(f"Signature Header: {sig_header}")
+    logger.debug(f"Payload: {payload}")
+    logger.debug(f"Signature Header: {sig_header}")
 
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-        logger.info(f"Constructed Event: {event}")
+        logger.debug(f"Constructed Event: {event}")
     except ValueError as e:
         logger.error(f"Invalid payload: {str(e)}")
         return 'Invalid payload', 400
@@ -143,8 +147,8 @@ def handle_verification_verified(session_id: str) -> None:
             session_id,
             expand=['verified_outputs.dob']
         )
-        logger.info(f"Verification session: {session}")
-        logger.info(f"Verified outputs: {session.verified_outputs}")
+        logger.debug(f"Verification session: {session}")
+        logger.debug(f"Verified outputs: {session.verified_outputs}")
     except Exception as e:
         logger.error(f"Failed to retrieve verification session: {str(e)}")
         return
