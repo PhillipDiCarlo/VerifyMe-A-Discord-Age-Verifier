@@ -1,22 +1,20 @@
+import os
+import json
+import asyncio
+import threading
+import logging
+from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
+
 import discord
 from discord import app_commands
-from flask import Flask, request, redirect, session, jsonify
-import os
-from os import environ
-import asyncio
+from flask import Flask, jsonify
+from dotenv import load_dotenv
+import pika
+import stripe
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from datetime import datetime, timedelta, timezone
-import threading
-import logging
-from dotenv import load_dotenv
-import pika
-import json
-import stripe
-from contextlib import contextmanager
-from functools import partial
-import time
 
 # Load environment variables
 load_dotenv()
