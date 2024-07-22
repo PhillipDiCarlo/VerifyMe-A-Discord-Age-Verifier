@@ -136,7 +136,7 @@ def handle_verification_verified(session_id: str) -> None:
     try:
         session = stripe.identity.VerificationSession.retrieve(
             session_id,
-            expand=['verified_outputs']
+            expand=['verified_outputs.dob']
         )
         logger.info(f"Verification session: {session}")
         logger.info(f"Verified outputs: {session.verified_outputs}")
