@@ -8,8 +8,7 @@ from dotenv import load_dotenv
 from typing import Dict, Any
 from pika.exceptions import AMQPError
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Date
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 from contextlib import contextmanager
 
@@ -111,17 +110,23 @@ def send_to_queue(message: Dict[str, Any], max_retries: int = 3) -> None:
 @app.route('/stripe_webhook', methods=['POST'])
 def stripe_webhook() -> tuple:
     logger.info("Received a webhook from Stripe")
-    payload = request.data
+    payload = request.data.decode('utf-8')
     sig_header = request.headers.get('Stripe-Signature')
+
+    logger.info(f"Payload: {payload}")
+    logger.info(f"Signature Header: {sig_header}")
 
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+        logger.info(f"Constructed Event: {event}")
     except ValueError as e:
         logger.error(f"Invalid payload: {str(e)}")
         return 'Invalid payload', 400
     except stripe.error.SignatureVerificationError as e:
         logger.error(f"Invalid signature: {str(e)}")
         return 'Invalid signature', 400
+
+    logger.info(f"Webhook event type: {event['type']}")
 
     if event['type'] == 'identity.verification_session.verified':
         handle_verification_verified(event['data']['object']['id'])
