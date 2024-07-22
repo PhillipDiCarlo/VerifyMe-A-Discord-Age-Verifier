@@ -16,9 +16,19 @@ import json
 import stripe
 from contextlib import contextmanager
 from functools import partial
+import time
 
 # Load environment variables
 load_dotenv()
+
+# Set up logging
+log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+logging.basicConfig(
+    level=getattr(logging, log_level),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Retrieve environment variables
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
@@ -165,18 +175,49 @@ async def update_user_verification_status(discord_id, status):
                 user.verification_status = status
     await main_loop.run_in_executor(None, db_update)
 
+
 def track_verification_attempt(discord_id):
-    with session_scope() as session:
-        user = session.query(User).filter_by(discord_id=str(discord_id)).first()
-        if user:
-            user.last_verification_attempt = datetime.now(timezone.utc)
-        else:
-            new_user = User(
-                discord_id=str(discord_id),
-                verification_status=False,
-                last_verification_attempt=datetime.now(timezone.utc)
-            )
-            session.add(new_user)
+    logger.info(f"Tracking verification attempt for user {discord_id}")
+    try:
+        with session_scope() as session:
+            user = session.query(User).filter_by(discord_id=str(discord_id)).first()
+            if user:
+                logger.debug(f"Updating existing user {discord_id}")
+                user.last_verification_attempt = datetime.now(timezone.utc)
+            else:
+                logger.debug(f"Creating new user record for {discord_id}")
+                new_user = User(
+                    discord_id=str(discord_id),
+                    verification_status=False,
+                    last_verification_attempt=datetime.now(timezone.utc)
+                )
+                session.add(new_user)
+            
+            logger.debug(f"Attempting to commit changes for user {discord_id}")
+            commit_successful = [False]
+            
+            def commit_with_timeout():
+                try:
+                    session.commit()
+                    commit_successful[0] = True
+                except Exception as e:
+                    logger.error(f"Error during commit for user {discord_id}: {str(e)}", exc_info=True)
+
+            commit_thread = threading.Thread(target=commit_with_timeout)
+            commit_thread.start()
+            commit_thread.join(timeout=10)  # Wait for up to 10 seconds
+
+            if commit_successful[0]:
+                logger.debug(f"Successfully committed changes for user {discord_id}")
+            else:
+                logger.error(f"Commit operation timed out for user {discord_id}")
+                raise TimeoutError("Database commit operation timed out")
+
+    except Exception as e:
+        logger.error(f"Error tracking verification attempt for user {discord_id}: {str(e)}", exc_info=True)
+        raise
+
+    logger.debug(f"Successfully tracked verification attempt for user {discord_id}")
 
 def track_command_usage(server_id, user_id, command):
     with session_scope() as session:
@@ -205,6 +246,7 @@ async def assign_role(guild_id, user_id, role_id):
 
 async def generate_stripe_verification_url(guild_id, user_id, role_id, channel_id):
     try:
+        logger.debug(f"Creating Stripe verification session for user {user_id}")
         verification_session = stripe.identity.VerificationSession.create(
             type='document',
             metadata={
@@ -221,9 +263,13 @@ async def generate_stripe_verification_url(guild_id, user_id, role_id, channel_i
                 }
             }
         )
+        logger.debug(f"Successfully created Stripe verification session for user {user_id}")
         return verification_session.url
     except stripe.error.StripeError as e:
-        logging.error(f"Stripe API error: {str(e)}")
+        logger.error(f"Stripe API error for user {user_id}: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in generate_stripe_verification_url for user {user_id}: {str(e)}", exc_info=True)
         return None
 
 async def process_verification_result(message):
@@ -271,19 +317,19 @@ async def consume_queue():
 
 @bot.event
 async def on_ready():
-    print(f'Bot is ready. Logged in as {bot.user}')
+    logger.info(f'Bot is ready. Logged in as {bot.user}')
     bot.last_startup_time = datetime.now(timezone.utc)
     bot.loop.create_task(consume_queue())
     try:
         synced = await bot.tree.sync()
-        logging.info(f"Synced {len(synced)} command(s)")
+        logger.debug(f"Synced {len(synced)} command(s)")
     except Exception as e:
-        logging.error(f"Failed to sync commands: {e}")
+        logger.error(f"Failed to sync commands: {e}")
 
 @bot.tree.command(name="verify", description="Start the age verification process")
 async def verify(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    logging.info(f"Received /verify command from user {interaction.user.id} in guild {interaction.guild.id}")
+    logger.debug(f"Received /verify command from user {interaction.user.id} in guild {interaction.guild.id}")
 
     try:
         guild_id = str(interaction.guild.id)
@@ -291,9 +337,13 @@ async def verify(interaction: discord.Interaction):
 
         with session_scope() as session:
             user = session.query(User).filter_by(discord_id=str(interaction.user.id)).first()
-            if user and user.last_verification_attempt and user.last_verification_attempt < bot.last_startup_time:
-                logging.info(f"Resetting cooldown for user {interaction.user.id}")
-                user.last_verification_attempt = None
+            if user and user.last_verification_attempt:
+                if user.last_verification_attempt < bot.last_startup_time:
+                    logger.debug(f"Resetting cooldown for user {interaction.user.id}")
+                    user.last_verification_attempt = None
+                elif is_user_in_cooldown(user.last_verification_attempt):
+                    await interaction.followup.send(f"You're in a cooldown period. Please wait before attempting to verify again.", ephemeral=True)
+                    return
 
             required_tier = get_required_tier(member_count)
             server_config = session.query(Server).filter_by(server_id=guild_id).first()
@@ -304,7 +354,7 @@ async def verify(interaction: discord.Interaction):
 
             verification_role = interaction.guild.get_role(int(server_config.role_id))
             if not verification_role:
-                logging.warning(f"Verification role {server_config.role_id} not found in guild {guild_id}")
+                logger.warning(f"Verification role {server_config.role_id} not found in guild {guild_id}")
                 await interaction.followup.send("The configured verification role no longer exists. Please ask an admin to set up the role again using `/set_role`.", ephemeral=True)
                 return
 
@@ -312,46 +362,97 @@ async def verify(interaction: discord.Interaction):
             if not await validate_subscription(subscribed_tier, required_tier, member_count, interaction):
                 return
 
-            if is_user_in_cooldown(interaction.user.id):
-                await interaction.followup.send(f"You're in a cooldown period. Please wait before attempting to verify again.", ephemeral=True)
-                return
-
             if user and user.verification_status:
                 await assign_role(guild_id, interaction.user.id, server_config.role_id)
                 await interaction.followup.send("You are already verified. Your role has been assigned.", ephemeral=True)
                 return
             
+            logger.debug(f"Generating Stripe verification URL for user {interaction.user.id}")
             verification_url = await generate_stripe_verification_url(guild_id, interaction.user.id, server_config.role_id, str(interaction.channel.id))
-            if not verification_url:
-                await interaction.followup.send("Failed to initiate the verification process. Please try again later or contact support.", ephemeral=True)
-                return
+        
+        if not verification_url:
+            logger.error(f"Failed to generate Stripe verification URL for user {interaction.user.id}")
+            await interaction.followup.send("Failed to initiate the verification process. Please try again later or contact support.", ephemeral=True)
+            return
 
-            track_verification_attempt(interaction.user.id)
-            track_command_usage(guild_id, interaction.user.id, "verify")
-            await interaction.followup.send(f"Click the link below to verify your age. This link is private and should not be shared:\n\n{verification_url}", ephemeral=True)
+        logger.debug(f"Successfully generated Stripe verification URL for user {interaction.user.id}")
+
+        # Move track_verification_attempt to a background task
+        bot.loop.create_task(track_verification_attempt(interaction.user.id))
+        
+        # Move track_command_usage to a background task
+        bot.loop.create_task(track_command_usage(guild_id, interaction.user.id, "verify"))
+
+        logger.debug(f"About to send verification URL to user {interaction.user.id}")
+        await interaction.followup.send(f"Click the link below to verify your age. This link is private and should not be shared:\n\n{verification_url}", ephemeral=True)
+        logger.debug(f"Sent verification URL to user {interaction.user.id}")
 
     except Exception as e:
-        logging.error(f"Unexpected error in verify command: {str(e)}")
+        logger.error(f"Unexpected error in verify command: {str(e)}", exc_info=True)
         await interaction.followup.send("An unexpected error occurred. Please try again later or contact support.", ephemeral=True)
+
+    logger.debug(f"Verify command completed for user {interaction.user.id}")
+
+
+async def track_verification_attempt(discord_id):
+    logger.debug(f"Tracking verification attempt for user {discord_id}")
+    try:
+        with session_scope() as session:
+            user = session.query(User).filter_by(discord_id=str(discord_id)).first()
+            if user:
+                user.last_verification_attempt = datetime.now(timezone.utc)
+            else:
+                new_user = User(
+                    discord_id=str(discord_id),
+                    verification_status=False,
+                    last_verification_attempt=datetime.now(timezone.utc)
+                )
+                session.add(new_user)
+            session.commit()
+        logger.info(f"Successfully tracked verification attempt for user {discord_id}")
+    except Exception as e:
+        logger.error(f"Error tracking verification attempt for user {discord_id}: {str(e)}", exc_info=True)
+
+async def track_command_usage(server_id, user_id, command):
+    try:
+        with session_scope() as session:
+            new_usage = CommandUsage(
+                server_id=str(server_id),
+                user_id=str(user_id),
+                command=command,
+                timestamp=datetime.now(timezone.utc)
+            )
+            session.add(new_usage)
+            session.commit()
+        logger.debug(f"Successfully tracked command usage for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error tracking command usage for user {user_id}: {str(e)}", exc_info=True)
+
+def is_user_in_cooldown(last_attempt):
+    if last_attempt:
+        cooldown_end = last_attempt + timedelta(seconds=COOLDOWN_PERIOD)
+        return datetime.now(timezone.utc) < cooldown_end
+    return False
+
 
 async def send_error_response(interaction, server_config, guild_id):
     if not server_config:
         await interaction.followup.send("This server is not configured for verification. Please ask an admin to set up the server using `/set_role`.", ephemeral=True)
     elif not server_config.role_id:
-        logging.warning(f"No verification role set for guild {guild_id}")
+        logger.warning(f"No verification role set for guild {guild_id}")
         await interaction.followup.send("The verification role has not been set for this server. Please ask an admin to set up the role using `/set_role`.", ephemeral=True)
     elif not server_config.subscription_status:
-        logging.warning(f"No active subscription for guild {guild_id}")
+        logger.warning(f"No active subscription for guild {guild_id}")
         await interaction.followup.send("This server does not have an active verification subscription.", ephemeral=True)
 
 async def validate_subscription(subscribed_tier, required_tier, member_count, interaction):
     if subscribed_tier not in tier_requirements:
-        logging.warning(f"Invalid subscription tier {subscribed_tier}")
+        logger.warning(f"Invalid subscription tier {subscribed_tier}")
         await interaction.followup.send("Invalid verification tier configured for this server. Please ask an admin to update the subscription.", ephemeral=True)
         return False
 
     if tier_requirements[subscribed_tier] < tier_requirements[required_tier]:
-        logging.warning(f"Subscription tier {subscribed_tier} does not cover {member_count} members")
+        logger.warning(f"Subscription tier {subscribed_tier} does not cover {member_count} members")
         await interaction.followup.send(f"This server's verification subscription ({subscribed_tier}) does not cover {member_count} members. Please ask an admin to upgrade to {required_tier}.", ephemeral=True)
         return False
     return True
@@ -486,7 +587,7 @@ def analytics():
     return jsonify(analytics_data)
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logger.info)
 
 def run_flask():
     app.run(host='0.0.0.0', port=5000)
