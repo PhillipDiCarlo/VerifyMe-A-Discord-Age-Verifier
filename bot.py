@@ -22,7 +22,7 @@ load_dotenv()
 
 # Retrieve environment variables
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-STRIPE_SECRET_KEY = os.getenv('STRIPE_RESTRICTED_SECRET_KEY')
+STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
 SECRET_KEY = os.getenv('SECRET_KEY')
 REDIRECT_URI = os.getenv('REDIRECT_URI')
 DATABASE_URL = os.getenv('DATABASE_URL')
