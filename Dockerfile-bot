@@ -1,0 +1,14 @@
+FROM python:3.8-slim
+
+WORKDIR /app
+
+COPY requirements.txt requirements.txt
+RUN pip install -r requirements.txt
+
+COPY bot.py wsgi_bot.py /app/
+
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "wsgi_bot:app"]
+
+
+# docker build -t discord-bot-service -f Dockerfile-bot .
+# docker run -d -p 5000:5000 --name discord-bot-service discord-bot-service

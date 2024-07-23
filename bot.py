@@ -1,14 +1,12 @@
 import os
 import json
 import asyncio
-import threading
 import logging
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 
 import discord
 from discord import app_commands
-from flask import Flask, jsonify
 from dotenv import load_dotenv
 import pika
 import stripe
@@ -31,8 +29,6 @@ logger = logging.getLogger(__name__)
 # Retrieve environment variables
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
-SECRET_KEY = os.getenv('SECRET_KEY')
-REDIRECT_URI = os.getenv('REDIRECT_URI')
 DATABASE_URL = os.getenv('DATABASE_URL')
 
 # RabbitMQ Configuration
@@ -70,10 +66,6 @@ class MyBot(discord.Client):
 
 bot = MyBot()
 
-# Flask app setup
-app = Flask(__name__)
-app.secret_key = SECRET_KEY
-
 # Stripe setup
 stripe.api_key = STRIPE_SECRET_KEY
 
@@ -94,7 +86,6 @@ class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True)
     discord_id = Column(String(30), nullable=False)
-    # username = Column(String(100))
     verification_status = Column(Boolean, default=False)
     last_verification_attempt = Column(DateTime(timezone=True))
 
@@ -172,7 +163,6 @@ async def update_user_verification_status(discord_id, status):
             if user:
                 user.verification_status = status
     await main_loop.run_in_executor(None, db_update)
-
 
 def track_verification_attempt(discord_id):
     logger.info(f"Tracking verification attempt for user {discord_id}")
@@ -391,7 +381,6 @@ async def verify(interaction: discord.Interaction):
 
     logger.debug(f"Verify command completed for user {interaction.user.id}")
 
-
 async def track_verification_attempt(discord_id):
     logger.debug(f"Tracking verification attempt for user {discord_id}")
     try:
@@ -432,7 +421,6 @@ def is_user_in_cooldown(last_attempt):
         return datetime.now(timezone.utc) < cooldown_end
     return False
 
-
 async def send_error_response(interaction, server_config, guild_id):
     if not server_config:
         await interaction.followup.send("This server is not configured for verification. Please ask an admin to set up the server using `/set_role`.", ephemeral=True)
@@ -454,7 +442,6 @@ async def validate_subscription(subscribed_tier, required_tier, member_count, in
         await interaction.followup.send(f"This server's verification subscription ({subscribed_tier}) does not cover {member_count} members. Please ask an admin to upgrade to {required_tier}.", ephemeral=True)
         return False
     return True
-
 
 @bot.tree.command(name="set_role", description="Set the role for verified users")
 @app_commands.describe(role="The role to assign to verified users")
@@ -576,20 +563,5 @@ async def verification_logs(interaction: discord.Interaction, limit: int = 10):
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message("Pong!", ephemeral=True)
 
-# Flask routes
-@app.route('/analytics')
-def analytics():
-    with session_scope() as session:
-        result = session.query(CommandUsage).all()
-        analytics_data = [{"server_id": row.server_id, "user_id": row.user_id, "command": row.command, "timestamp": row.timestamp} for row in result]
-    return jsonify(analytics_data)
-
-# Configure logging
-logging.basicConfig(level=logger.info)
-
-def run_flask():
-    app.run(host='0.0.0.0', port=5000)
-
 if __name__ == '__main__':
-    threading.Thread(target=run_flask).start()
     bot.run(DISCORD_BOT_TOKEN)
