@@ -333,13 +333,6 @@ async def on_ready():
     bot.last_startup_time = datetime.now(timezone.utc)
     bot.loop.create_task(consume_queue())
 
-    # TODO: REMOVE THIS BEFORE PUSHING
-    for guild in bot.guilds:
-        logger.info(f"Bot is in guild {guild.name} (ID: {guild.id})")
-        logger.info("Listing members in the guild:")
-        for member in guild.members:
-            logger.info(f"Member: {member.name} (ID: {member.id})")
-    
     try:
         synced = await bot.tree.sync()
         logger.debug(f"Synced {len(synced)} command(s)")
