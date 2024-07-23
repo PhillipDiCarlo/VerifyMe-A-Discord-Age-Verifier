@@ -53,7 +53,7 @@ Session = sessionmaker(bind=engine)
 
 # Initialize the Discord bot with intents
 intents = discord.Intents.default()
-intents.message_content = True
+intents.members = True  # Enable the members intent
 
 class MyBot(discord.Client):
     def __init__(self):
@@ -231,11 +231,13 @@ async def assign_role(guild_id, user_id, role_id):
         logger.error(f"Guild {guild_id} not found")
         return
     
+    logger.debug(f"Attempting to find member {user_id} in guild {guild_id}")
     member = guild.get_member(int(user_id))
     if not member:
         logger.error(f"Member {user_id} not found in guild {guild_id}")
         return
 
+    logger.debug(f"Found member {user_id} in guild {guild_id}, attempting to find role {role_id}")
     role = guild.get_role(int(role_id))
     if not role:
         logger.error(f"Role {role_id} not found in guild {guild_id}")
@@ -252,7 +254,6 @@ async def assign_role(guild_id, user_id, role_id):
         logger.error(f"Failed to assign role {role.name} to user {member.name}: {str(e)}")
     except Exception as e:
         logger.error(f"Unexpected error assigning role {role.name} to user {member.name}: {str(e)}")
-
 
 async def generate_stripe_verification_url(guild_id, user_id, role_id, channel_id):
     try:
@@ -284,7 +285,7 @@ async def generate_stripe_verification_url(guild_id, user_id, role_id, channel_i
 
 async def process_verification_result(message):
     data = json.loads(message)
-    logger.info(f"Received message from RabbitMQ: {data}")  # Add this line
+    logger.debug(f"Received message from RabbitMQ: {data}")
     if data['type'] == 'verification_verified':
         guild_id = data['guild_id']
         user_id = data['user_id']
@@ -331,6 +332,14 @@ async def on_ready():
     logger.info(f'Bot is ready. Logged in as {bot.user}')
     bot.last_startup_time = datetime.now(timezone.utc)
     bot.loop.create_task(consume_queue())
+
+    # TODO: REMOVE THIS BEFORE PUSHING
+    for guild in bot.guilds:
+        logger.info(f"Bot is in guild {guild.name} (ID: {guild.id})")
+        logger.info("Listing members in the guild:")
+        for member in guild.members:
+            logger.info(f"Member: {member.name} (ID: {member.id})")
+    
     try:
         synced = await bot.tree.sync()
         logger.debug(f"Synced {len(synced)} command(s)")
