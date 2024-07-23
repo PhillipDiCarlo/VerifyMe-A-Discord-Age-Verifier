@@ -227,10 +227,32 @@ def is_user_in_cooldown(discord_id):
 
 async def assign_role(guild_id, user_id, role_id):
     guild = bot.get_guild(int(guild_id))
+    if not guild:
+        logger.error(f"Guild {guild_id} not found")
+        return
+    
     member = guild.get_member(int(user_id))
+    if not member:
+        logger.error(f"Member {user_id} not found in guild {guild_id}")
+        return
+
     role = guild.get_role(int(role_id))
-    if member and role:
+    if not role:
+        logger.error(f"Role {role_id} not found in guild {guild_id}")
+        return
+
+    logger.debug(f"Attempting to assign role {role.name} to user {member.name}")
+
+    try:
         await member.add_roles(role)
+        logger.info(f"Successfully assigned role {role.name} to user {member.name}")
+    except discord.Forbidden:
+        logger.error(f"Bot does not have permission to assign role {role.name} in guild {guild_id}")
+    except discord.HTTPException as e:
+        logger.error(f"Failed to assign role {role.name} to user {member.name}: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error assigning role {role.name} to user {member.name}: {str(e)}")
+
 
 async def generate_stripe_verification_url(guild_id, user_id, role_id, channel_id):
     try:
@@ -262,6 +284,7 @@ async def generate_stripe_verification_url(guild_id, user_id, role_id, channel_i
 
 async def process_verification_result(message):
     data = json.loads(message)
+    logger.info(f"Received message from RabbitMQ: {data}")  # Add this line
     if data['type'] == 'verification_verified':
         guild_id = data['guild_id']
         user_id = data['user_id']

@@ -105,6 +105,7 @@ def send_to_queue(message: Dict[str, Any], max_retries: int = 3) -> None:
             )
             connection.close()
             logger.debug("Message sent to queue successfully")
+            logger.debug(f"Sent message to queue: {message}")
             return
         except AMQPError as e:
             logger.warning(f"Failed to send message to queue: {str(e)}. Retry {retries + 1}/{max_retries}")

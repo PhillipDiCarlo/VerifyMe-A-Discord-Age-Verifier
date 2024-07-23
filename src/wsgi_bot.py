@@ -1,5 +1,3 @@
-# wsgi_bot.py
-from bot import app
+from bot import bot
 
-if __name__ == "__main__":
-    app.run()
+app = bot
