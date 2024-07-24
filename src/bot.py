@@ -484,7 +484,7 @@ async def set_role(interaction: discord.Interaction, role: discord.Role):
                 server_id=guild_id,
                 owner_id=str(interaction.guild.owner_id),
                 role_id=str(role.id),
-                subscription_status=True  # Assuming subscription is active for testing
+                subscription_status=False  # Set to True for testing
             )
             session.add(new_server)
         else:
@@ -519,22 +519,25 @@ async def set_subscription(interaction: discord.Interaction, tier: str):
 @app_commands.checks.has_permissions(administrator=True)
 async def server_info(interaction: discord.Interaction):
     guild_id = str(interaction.guild.id)
-    server_config = get_server_config(guild_id)
-
-    if not server_config:
-        await interaction.response.send_message("This server is not configured for verification.", ephemeral=True)
-        return
-
-    verification_role = interaction.guild.get_role(int(server_config.role_id)) if server_config.role_id else None
     
-    embed = discord.Embed(title="Server Verification Configuration", color=discord.Color.blue())
-    embed.add_field(name="Verification Role", value=verification_role.name if verification_role else "Not set", inline=False)
-    embed.add_field(name="Subscription Tier", value=server_config.tier, inline=True)
-    embed.add_field(name="Subscription Status", value="Active" if server_config.subscription_status else "Inactive", inline=True)
-    embed.add_field(name="Member Count", value=str(interaction.guild.member_count), inline=True)
-    embed.add_field(name="Required Tier", value=get_required_tier(interaction.guild.member_count), inline=True)
+    with session_scope() as session:
+        server_config = session.query(Server).filter_by(server_id=guild_id).first()
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+        if not server_config:
+            await interaction.response.send_message("This server is not configured for verification.", ephemeral=True)
+            return
+
+        verification_role = interaction.guild.get_role(int(server_config.role_id)) if server_config.role_id else None
+
+        embed = discord.Embed(title="Server Verification Configuration", color=discord.Color.blue())
+        embed.add_field(name="Verification Role", value=verification_role.name if verification_role else "Not set", inline=False)
+        embed.add_field(name="Subscription Tier", value=server_config.tier, inline=True)
+        embed.add_field(name="Subscription Status", value="Active" if server_config.subscription_status else "Inactive", inline=True)
+        embed.add_field(name="Member Count", value=str(interaction.guild.member_count), inline=True)
+        embed.add_field(name="Required Tier", value=get_required_tier(interaction.guild.member_count), inline=True)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 @bot.tree.command(name="subscription_status", description="Show detailed information about the server's verification subscription")
 @app_commands.checks.has_permissions(administrator=True)
