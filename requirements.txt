@@ -4,6 +4,7 @@ python-dotenv
 SQLAlchemy
 psycopg2
 stripe
-asyncio
+pika
 cryptography
 pyngrok
+gunicorn

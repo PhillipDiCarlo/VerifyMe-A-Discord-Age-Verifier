@@ -1,0 +1,13 @@
+FROM python:3.8-slim
+
+WORKDIR /app
+
+COPY requirements.txt requirements.txt
+RUN pip install -r requirements.txt
+
+COPY stripe_webhook_service.py wsgi_stripe.py /app/
+
+CMD ["gunicorn", "--bind", "0.0.0.0:5431", "wsgi_stripe:app"]
+
+# docker build -t stripe-webhook-service -f Dockerfile-stripe .
+# docker run -d -p 5431:5431 --name stripe-webhook-service stripe-webhook-service
