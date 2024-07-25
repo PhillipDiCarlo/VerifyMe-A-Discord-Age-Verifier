@@ -71,11 +71,12 @@ stripe.api_key = STRIPE_SECRET_KEY
 
 # Subscription tier requirements
 tier_requirements = {
-    "tier_A": 250,
-    "tier_B": 500,
-    "tier_C": 1000,
-    "tier_D": 5000,
-    "tier_E": float('inf')  # No upper limit
+    "tier_1": 10,
+    "tier_2": 25,
+    "tier_3": 50,
+    "tier_4": 75,
+    "tier_5": 100,
+    "tier_6": 150
 }
 
 # Cooldown period (seconds)
@@ -95,8 +96,9 @@ class Server(Base):
     server_id = Column(String(30), nullable=False, unique=True)
     owner_id = Column(String(30), nullable=False)
     role_id = Column(String(30), nullable=False)
-    tier = Column(String(50), default='tier_A', nullable=False)
+    tier = Column(String(50), default='tier_1', nullable=False)
     subscription_status = Column(Boolean, default=False)
+    verifications_count = Column(Integer, default=0)
 
 class CommandUsage(Base):
     __tablename__ = 'command_usage'
@@ -136,18 +138,6 @@ def session_scope():
     finally:
         session.close()
 
-def get_required_tier(member_count):
-    if member_count <= tier_requirements["tier_A"]:
-        return "tier_A"
-    elif member_count <= tier_requirements["tier_B"]:
-        return "tier_B"
-    elif member_count <= tier_requirements["tier_C"]:
-        return "tier_C"
-    elif member_count <= tier_requirements["tier_D"]:
-        return "tier_D"
-    else:
-        return "tier_E"
-
 def get_server_config(guild_id):
     with session_scope() as session:
         return session.query(Server).filter_by(server_id=str(guild_id)).first()
@@ -164,66 +154,21 @@ async def update_user_verification_status(discord_id, status):
                 user.verification_status = status
     await main_loop.run_in_executor(None, db_update)
 
-def track_verification_attempt(discord_id):
-    logger.info(f"Tracking verification attempt for user {discord_id}")
-    try:
+async def increment_verifications_count(server_id):
+    def db_update():
         with session_scope() as session:
-            user = session.query(User).filter_by(discord_id=str(discord_id)).first()
-            if user:
-                logger.debug(f"Updating existing user {discord_id}")
-                user.last_verification_attempt = datetime.now(timezone.utc)
-            else:
-                logger.debug(f"Creating new user record for {discord_id}")
-                new_user = User(
-                    discord_id=str(discord_id),
-                    verification_status=False,
-                    last_verification_attempt=datetime.now(timezone.utc)
-                )
-                session.add(new_user)
-            
-            logger.debug(f"Attempting to commit changes for user {discord_id}")
-            commit_successful = [False]
-            
-            def commit_with_timeout():
-                try:
-                    session.commit()
-                    commit_successful[0] = True
-                except Exception as e:
-                    logger.error(f"Error during commit for user {discord_id}: {str(e)}", exc_info=True)
+            server = session.query(Server).filter_by(server_id=str(server_id)).first()
+            if server:
+                server.verifications_count += 1
+    await main_loop.run_in_executor(None, db_update)
 
-            commit_thread = threading.Thread(target=commit_with_timeout)
-            commit_thread.start()
-            commit_thread.join(timeout=10)  # Wait for up to 10 seconds
-
-            if commit_successful[0]:
-                logger.debug(f"Successfully committed changes for user {discord_id}")
-            else:
-                logger.error(f"Commit operation timed out for user {discord_id}")
-                raise TimeoutError("Database commit operation timed out")
-
-    except Exception as e:
-        logger.error(f"Error tracking verification attempt for user {discord_id}: {str(e)}", exc_info=True)
-        raise
-
-    logger.debug(f"Successfully tracked verification attempt for user {discord_id}")
-
-def track_command_usage(server_id, user_id, command):
-    with session_scope() as session:
-        new_usage = CommandUsage(
-            server_id=str(server_id),
-            user_id=str(user_id),
-            command=command,
-            timestamp=datetime.now(timezone.utc)
-        )
-        session.add(new_usage)
-
-def is_user_in_cooldown(discord_id):
-    with session_scope() as session:
-        user = session.query(User).filter_by(discord_id=str(discord_id)).first()
-        if user and user.last_verification_attempt:
-            cooldown_end = user.last_verification_attempt + timedelta(seconds=COOLDOWN_PERIOD)
-            return datetime.now(timezone.utc) < cooldown_end
-    return False
+async def reset_verifications_count():
+    def db_update():
+        with session_scope() as session:
+            servers = session.query(Server).all()
+            for server in servers:
+                server.verifications_count = 0
+    await main_loop.run_in_executor(None, db_update)
 
 async def assign_role(guild_id, user_id, role_id):
     guild = bot.get_guild(int(guild_id))
@@ -248,6 +193,7 @@ async def assign_role(guild_id, user_id, role_id):
     try:
         await member.add_roles(role)
         logger.info(f"Successfully assigned role {role.name} to user {member.name}")
+        await increment_verifications_count(guild_id)
     except discord.Forbidden:
         logger.error(f"Bot does not have permission to assign role {role.name} in guild {guild_id}")
     except discord.HTTPException as e:
@@ -332,6 +278,7 @@ async def on_ready():
     logger.info(f'Bot is ready. Logged in as {bot.user}')
     bot.last_startup_time = datetime.now(timezone.utc)
     bot.loop.create_task(consume_queue())
+    bot.loop.create_task(reset_verifications_count())
 
     try:
         synced = await bot.tree.sync()
@@ -346,10 +293,12 @@ async def verify(interaction: discord.Interaction):
 
     try:
         guild_id = str(interaction.guild.id)
-        member_count = interaction.guild.member_count
+        user_id = str(interaction.user.id)
 
         with session_scope() as session:
-            user = session.query(User).filter_by(discord_id=str(interaction.user.id)).first()
+            user = session.query(User).filter_by(discord_id=user_id).first()
+            server_config = session.query(Server).filter_by(server_id=guild_id).first()
+
             if user and user.last_verification_attempt:
                 if user.last_verification_attempt < bot.last_startup_time:
                     logger.debug(f"Resetting cooldown for user {interaction.user.id}")
@@ -358,21 +307,18 @@ async def verify(interaction: discord.Interaction):
                     await interaction.followup.send(f"You're in a cooldown period. Please wait before attempting to verify again.", ephemeral=True)
                     return
 
-            required_tier = get_required_tier(member_count)
-            server_config = session.query(Server).filter_by(server_id=guild_id).first()
-
             if not server_config or not server_config.role_id or not server_config.subscription_status:
                 await send_error_response(interaction, server_config, guild_id)
+                return
+
+            if server_config.verifications_count >= tier_requirements[server_config.tier]:
+                await interaction.followup.send("This server has reached its monthly verification limit. Please contact an admin to upgrade the plan or wait until next month.", ephemeral=True)
                 return
 
             verification_role = interaction.guild.get_role(int(server_config.role_id))
             if not verification_role:
                 logger.warning(f"Verification role {server_config.role_id} not found in guild {guild_id}")
                 await interaction.followup.send("The configured verification role no longer exists. Please ask an admin to set up the role again using `/set_role`.", ephemeral=True)
-                return
-
-            subscribed_tier = server_config.tier
-            if not await validate_subscription(subscribed_tier, required_tier, member_count, interaction):
                 return
 
             if user and user.verification_status:
@@ -390,13 +336,9 @@ async def verify(interaction: discord.Interaction):
 
         logger.debug(f"Successfully generated Stripe verification URL for user {interaction.user.id}")
 
-        # Move track_verification_attempt to a background task
         bot.loop.create_task(track_verification_attempt(interaction.user.id))
-        
-        # Move track_command_usage to a background task
         bot.loop.create_task(track_command_usage(guild_id, interaction.user.id, "verify"))
 
-        logger.debug(f"About to send verification URL to user {interaction.user.id}")
         await interaction.followup.send(f"Click the link below to verify your age. This link is private and should not be shared:\n\n{verification_url}", ephemeral=True)
         logger.debug(f"Sent verification URL to user {interaction.user.id}")
 
@@ -455,18 +397,6 @@ async def send_error_response(interaction, server_config, guild_id):
     elif not server_config.subscription_status:
         logger.warning(f"No active subscription for guild {guild_id}")
         await interaction.followup.send("This server does not have an active verification subscription.", ephemeral=True)
-
-async def validate_subscription(subscribed_tier, required_tier, member_count, interaction):
-    if subscribed_tier not in tier_requirements:
-        logger.warning(f"Invalid subscription tier {subscribed_tier}")
-        await interaction.followup.send("Invalid verification tier configured for this server. Please ask an admin to update the subscription.", ephemeral=True)
-        return False
-
-    if tier_requirements[subscribed_tier] < tier_requirements[required_tier]:
-        logger.warning(f"Subscription tier {subscribed_tier} does not cover {member_count} members")
-        await interaction.followup.send(f"This server's verification subscription ({subscribed_tier}) does not cover {member_count} members. Please ask an admin to upgrade to {required_tier}.", ephemeral=True)
-        return False
-    return True
 
 @bot.tree.command(name="set_role", description="Set the role for verified users")
 @app_commands.describe(role="The role to assign to verified users")
@@ -533,8 +463,8 @@ async def server_info(interaction: discord.Interaction):
         embed.add_field(name="Verification Role", value=verification_role.name if verification_role else "Not set", inline=False)
         embed.add_field(name="Subscription Tier", value=server_config.tier, inline=True)
         embed.add_field(name="Subscription Status", value="Active" if server_config.subscription_status else "Inactive", inline=True)
-        embed.add_field(name="Member Count", value=str(interaction.guild.member_count), inline=True)
-        embed.add_field(name="Required Tier", value=get_required_tier(interaction.guild.member_count), inline=True)
+        embed.add_field(name="Verifications Count", value=str(server_config.verifications_count), inline=True)
+        embed.add_field(name="Max Verifications/Month", value=str(tier_requirements[server_config.tier]), inline=True)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -543,26 +473,26 @@ async def server_info(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(administrator=True)
 async def subscription_status(interaction: discord.Interaction):
     guild_id = str(interaction.guild.id)
-    server_config = get_server_config(guild_id)
 
-    if not server_config:
-        await interaction.response.send_message("This server is not configured for verification.", ephemeral=True)
-        return
+    with session_scope() as session:
+        server_config = session.query(Server).filter_by(server_id=guild_id).first()
 
-    current_tier = server_config.tier
-    required_tier = get_required_tier(interaction.guild.member_count)
+        if not server_config:
+            await interaction.response.send_message("This server is not configured for verification.", ephemeral=True)
+            return
 
-    embed = discord.Embed(title="Verification Subscription Status", color=discord.Color.green())
-    embed.add_field(name="Current Tier", value=current_tier, inline=True)
-    embed.add_field(name="Subscription Status", value="Active" if server_config.subscription_status else "Inactive", inline=True)
-    embed.add_field(name="Member Limit", value=str(tier_requirements[current_tier]), inline=True)
-    embed.add_field(name="Current Member Count", value=str(interaction.guild.member_count), inline=True)
-    embed.add_field(name="Required Tier", value=required_tier, inline=True)
+        current_tier = server_config.tier
 
-    if tier_requirements[current_tier] < interaction.guild.member_count:
-        embed.add_field(name="⚠️ Warning", value="Current tier does not cover all members. Please upgrade.", inline=False)
+        embed = discord.Embed(title="Verification Subscription Status", color=discord.Color.green())
+        embed.add_field(name="Current Tier", value=current_tier, inline=True)
+        embed.add_field(name="Subscription Status", value="Active" if server_config.subscription_status else "Inactive", inline=True)
+        embed.add_field(name="Verifications Count", value=str(server_config.verifications_count), inline=True)
+        embed.add_field(name="Max Verifications/Month", value=str(tier_requirements[current_tier]), inline=True)
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+        if server_config.verifications_count >= tier_requirements[current_tier]:
+            embed.add_field(name="⚠️ Warning", value="Current tier has reached the maximum number of verifications. Please upgrade.", inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="verification_logs", description="View recent verification actions")
 @app_commands.checks.has_permissions(administrator=True)
