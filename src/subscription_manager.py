@@ -55,7 +55,12 @@ def session_scope():
         session.close()
 
 # Logging setup
-logging.basicConfig(level=logging.DEBUG)
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 # Mapping of product IDs to tiers and their corresponding verification tokens
 PRODUCT_ID_TO_TIER = {
@@ -231,4 +236,4 @@ def handle_subscription_status(event):
         logging.error(f"Error updating database for subscription status: {e}")
 
 if __name__ == '__main__':
-    app.run(port=5432)
+    app.run(host='0.0.0.0', port=5433)
