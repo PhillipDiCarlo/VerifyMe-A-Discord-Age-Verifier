@@ -424,28 +424,13 @@ async def set_role(interaction: discord.Interaction, role: discord.Role):
 
     await interaction.response.send_message(f"Verification role set to: {role.name}", ephemeral=True)
 
-@bot.tree.command(name="set_subscription", description="Set the subscription tier for the server")
-@app_commands.describe(tier="The subscription tier to set")
-async def set_subscription(interaction: discord.Interaction, tier: str):
+@bot.tree.command(name="get_subscription", description="Get the subscription link for the server")
+async def get_subscription(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
 
-    guild_id = str(interaction.guild.id)
-    with session_scope() as session:
-        server_config = session.query(Server).filter_by(server_id=guild_id).first()
-
-        if not server_config:
-            await interaction.response.send_message("This server does not have an active subscription.", ephemeral=True)
-            return
-
-        if tier not in tier_requirements:
-            await interaction.response.send_message(f"Invalid tier. Available tiers: {', '.join(tier_requirements.keys())}", ephemeral=True)
-            return
-
-        server_config.tier = tier
-
-    await interaction.response.send_message(f"Subscription tier set to: {tier}", ephemeral=True)
+    await interaction.response.send_message("To activate a subscription, please visit: https://esattotech.com/pricing/", ephemeral=True)
 
 @bot.tree.command(name="server_info", description="Display current server configuration for verification")
 @app_commands.checks.has_permissions(administrator=True)
