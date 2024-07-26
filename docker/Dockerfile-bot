@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the entire project
 COPY src/ src/
 
+# Expose the port
+EXPOSE 5000
+
 # Run bot.py when the container launches
 CMD ["python", "src/bot.py"]
 
