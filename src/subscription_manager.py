@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 from contextlib import contextmanager
 import logging
+from datetime import datetime, timezone
 
 # Load environment variables
 load_dotenv()
@@ -16,7 +17,7 @@ app = Flask(__name__)
 
 # Stripe configuration
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
-endpoint_secret = os.getenv('STRIPE_WEBHOOK_SECRET')
+endpoint_secret = os.getenv('STRIPE_PAYMENT_WEBHOOK_SECRET')
 
 # Database setup
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -35,6 +36,8 @@ class Server(Base):
     verifications_count = Column(Integer, default=0)
     subscription_start_date = Column(DateTime(timezone=True), nullable=True)
     stripe_subscription_id = Column(String(255), nullable=True)
+    role_id = Column(String(30), nullable=True)  # Updated to allow NULL
+    email = Column(String(255), nullable=True)  # New column for storing customer email
 
 Base.metadata.create_all(engine)
 
@@ -54,10 +57,23 @@ def session_scope():
 # Logging setup
 logging.basicConfig(level=logging.DEBUG)
 
+# Mapping of product IDs to tiers
+PRODUCT_ID_TO_TIER = {
+    'prod_QXNi63ixsJYIke': 'tier_1', #10 tokens/month
+    'prod_QXNldB600Dr8RX': 'tier_2', #25 tokens/month
+    'prod_QXNnv5WYeieAGZ': 'tier_3', #50 tokens/month
+    'prod_QXNpnlGsJn210K': 'tier_4', #75 tokens/month
+    'prod_QXNrATAgXjN7Xi': 'tier_5', #100 tokens/month 
+    'prod_QXNtfHzYQ2EhUx': 'tier_6', #150 tokens/month
+}
+
 @app.route('/stripe-webhook', methods=['POST'])
 def stripe_webhook():
     payload = request.get_data(as_text=True)
     sig_header = request.headers.get('Stripe-Signature')
+
+    logging.info(f"Received webhook: {payload}")
+    logging.info(f"Signature header: {sig_header}")
 
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
@@ -89,16 +105,19 @@ def stripe_webhook():
 
 def handle_checkout_session(session):
     logging.info("Handling checkout.session.completed event")
-    customer_email = session.get('customer_email')
-    metadata = session.get('metadata', {})
-    user_id = metadata.get('user_id')
-    guild_id = metadata.get('guild_id')
+    customer_email = session['customer_details'].get('email')
+    custom_fields = session.get('custom_fields', [])
+    
+    # Extract custom fields
+    user_id = next((field['text']['value'] for field in custom_fields if field['key'] == 'discorduserid'), None)
+    guild_id = next((field['text']['value'] for field in custom_fields if field['key'] == 'discordserverid'), None)
     subscription_id = session.get('subscription')
 
     # Fetch the session's line items
     try:
         line_items = stripe.checkout.Session.list_line_items(session['id'])
-        tier = line_items['data'][0]['price']['id']
+        product_id = line_items['data'][0]['price']['product']
+        tier = PRODUCT_ID_TO_TIER.get(product_id)
     except Exception as e:
         logging.error(f"Error fetching line items: {e}")
         return
@@ -110,14 +129,25 @@ def handle_checkout_session(session):
     try:
         with session_scope() as db_session:
             server = db_session.query(Server).filter_by(server_id=guild_id).first()
-            if not server:
-                server = Server(server_id=guild_id, owner_id=user_id, tier=tier, subscription_status=True, stripe_subscription_id=subscription_id)
-                db_session.add(server)
-            else:
+            if server:
                 server.owner_id = user_id
                 server.tier = tier
                 server.subscription_status = True
+                server.subscription_start_date = datetime.now(timezone.utc)
                 server.stripe_subscription_id = subscription_id
+                server.email = customer_email
+            else:
+                server = Server(
+                    server_id=guild_id,
+                    owner_id=user_id,
+                    tier=tier,
+                    subscription_status=True,
+                    verifications_count=0,
+                    subscription_start_date = datetime.now(timezone.utc),
+                    stripe_subscription_id=subscription_id,
+                    email=customer_email
+                )
+                db_session.add(server)
             logging.info(f"Updated server {guild_id} with new subscription data")
     except Exception as e:
         logging.error(f"Error updating database for checkout session: {e}")
