@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 from contextlib import contextmanager
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # Load environment variables
 load_dotenv()
@@ -57,14 +57,14 @@ def session_scope():
 # Logging setup
 logging.basicConfig(level=logging.DEBUG)
 
-# Mapping of product IDs to tiers
+# Mapping of product IDs to tiers and their corresponding verification tokens
 PRODUCT_ID_TO_TIER = {
-    'prod_QXNi63ixsJYIke': 'tier_1', #10 tokens/month
-    'prod_QXNldB600Dr8RX': 'tier_2', #25 tokens/month
-    'prod_QXNnv5WYeieAGZ': 'tier_3', #50 tokens/month
-    'prod_QXNpnlGsJn210K': 'tier_4', #75 tokens/month
-    'prod_QXNrATAgXjN7Xi': 'tier_5', #100 tokens/month 
-    'prod_QXNtfHzYQ2EhUx': 'tier_6', #150 tokens/month
+    'prod_QXNi63ixsJYIke': {'tier': 'tier_1', 'tokens': 10},
+    'prod_QXNldB600Dr8RX': {'tier': 'tier_2', 'tokens': 25},
+    'prod_QXNnv5WYeieAGZ': {'tier': 'tier_3', 'tokens': 50},
+    'prod_QXNpnlGsJn210K': {'tier': 'tier_4', 'tokens': 75},
+    'prod_QXNrATAgXjN7Xi': {'tier': 'tier_5', 'tokens': 100},
+    'prod_QXNtfHzYQ2EhUx': {'tier': 'tier_6', 'tokens': 150},
 }
 
 @app.route('/stripe-webhook', methods=['POST'])
@@ -95,6 +95,8 @@ def stripe_webhook():
         if event['type'] == 'checkout.session.completed':
             session = event['data']['object']
             handle_checkout_session(session)
+        elif event['type'] in ['invoice.payment_failed', 'customer.subscription.updated']:
+            handle_subscription_status(event)
         elif event['type'].startswith('subscription_schedule'):
             handle_subscription_schedule(event)
     except Exception as e:
@@ -117,7 +119,9 @@ def handle_checkout_session(session):
     try:
         line_items = stripe.checkout.Session.list_line_items(session['id'])
         product_id = line_items['data'][0]['price']['product']
-        tier = PRODUCT_ID_TO_TIER.get(product_id)
+        tier_info = PRODUCT_ID_TO_TIER.get(product_id)
+        tier = tier_info['tier']
+        tokens = tier_info['tokens']
     except Exception as e:
         logging.error(f"Error fetching line items: {e}")
         return
@@ -130,20 +134,22 @@ def handle_checkout_session(session):
         with session_scope() as db_session:
             server = db_session.query(Server).filter_by(server_id=guild_id).first()
             if server:
+                old_tokens = PRODUCT_ID_TO_TIER.get(server.tier, {}).get('tokens', 0)
                 server.owner_id = user_id
                 server.tier = tier
                 server.subscription_status = True
                 server.subscription_start_date = datetime.now(timezone.utc)
                 server.stripe_subscription_id = subscription_id
                 server.email = customer_email
+                server.verifications_count = tokens - (old_tokens - server.verifications_count)
             else:
                 server = Server(
                     server_id=guild_id,
                     owner_id=user_id,
                     tier=tier,
                     subscription_status=True,
-                    verifications_count=0,
-                    subscription_start_date = datetime.now(timezone.utc),
+                    verifications_count=tokens,
+                    subscription_start_date=datetime.now(timezone.utc),
                     stripe_subscription_id=subscription_id,
                     email=customer_email
                 )
@@ -173,10 +179,40 @@ def handle_subscription_schedule(event):
                 server.subscription_status = False
             elif event['type'] == 'subscription_schedule.completed':
                 server.subscription_status = True
+                if server.subscription_start_date and datetime.now(timezone.utc) - server.subscription_start_date >= timedelta(days=30):
+                    tokens = PRODUCT_ID_TO_TIER.get(server.tier, {}).get('tokens', 0)
+                    server.verifications_count = tokens
+                    server.subscription_start_date = datetime.now(timezone.utc)
 
             logging.info(f"Updated server {server.server_id} subscription status to {server.subscription_status}")
     except Exception as e:
         logging.error(f"Error updating database for subscription schedule: {e}")
+
+def handle_subscription_status(event):
+    logging.info("Handling subscription status event")
+    subscription = event['data']['object']
+    subscription_id = subscription.get('id')
+    status = subscription.get('status')
+
+    if not subscription_id:
+        logging.error("Missing subscription ID in status event")
+        return
+
+    try:
+        with session_scope() as db_session:
+            server = db_session.query(Server).filter_by(stripe_subscription_id=subscription_id).first()
+            if not server:
+                logging.error(f"No server found with subscription ID {subscription_id}")
+                return
+
+            if status in ['canceled', 'incomplete', 'past_due']:
+                server.subscription_status = False
+            elif status == 'active':
+                server.subscription_status = True
+
+            logging.info(f"Updated server {server.server_id} subscription status to {server.subscription_status}")
+    except Exception as e:
+        logging.error(f"Error updating database for subscription status: {e}")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5433, debug=True)
