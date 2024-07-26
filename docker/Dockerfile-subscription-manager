@@ -1,18 +1,21 @@
 # Dockerfile-subscription-manager
-
-# Use an official Python runtime as a parent image
 FROM python:3.10-slim
 
 # Set the working directory in the container
 WORKDIR /app
 
+# Install the PostgreSQL development package
+RUN apt-get update && apt-get install -y libpq-dev gcc
+
+# Copy the requirements file into the container
 COPY config/other_configs/requirements.txt requirements.txt
 
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the entire project
+# Copy the current directory contents into the container at /app
 COPY src/ src/
+COPY config/gunicorn/gunicorn_subscription_config.py config/gunicorn/gunicorn_subscription_config.py
 
-# Run Gunicorn with the subscription manager app
+# Define the command to run the application
 CMD ["gunicorn", "-c", "config/gunicorn/gunicorn_subscription_config.py", "src.wsgi_subscription_manager:app"]
