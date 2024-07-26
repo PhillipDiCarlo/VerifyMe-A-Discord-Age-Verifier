@@ -1,4 +1,4 @@
-# Dockerfile-bot
+# Dockerfile-subscription-manager
 
 # Use an official Python runtime as a parent image
 FROM python:3.10-slim
@@ -14,10 +14,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the entire project
 COPY . .
 
-# Run bot.py when the container launches
-CMD ["python", "src/bot.py"]
-
-
-
-# docker build -t discord-age-verification-service -f Dockerfile-bot .
-# docker run -d -p 5000:5000 --name discord-age-verification-service discord-age-verification-service
+# Run Gunicorn with the subscription manager app
+CMD ["gunicorn", "-c", "config/gunicorn/gunicorn_subscription_config.py", "src.wsgi_subscription_manager:app"]

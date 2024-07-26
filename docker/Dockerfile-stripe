@@ -1,13 +1,18 @@
-FROM python:3.8-slim
+# Dockerfile-stripe
 
+# Use an official Python runtime as a parent image
+FROM python:3.10-slim
+
+# Set the working directory in the container
 WORKDIR /app
 
 COPY requirements.txt requirements.txt
-RUN pip install -r requirements.txt
 
-COPY stripe_webhook_service.py wsgi_stripe.py /app/
+# Install any needed packages specified in requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5431", "wsgi_stripe:app"]
+# Copy the entire project
+COPY . .
 
-# docker build -t stripe-webhook-service -f Dockerfile-stripe .
-# docker run -d -p 5431:5431 --name stripe-webhook-service stripe-webhook-service
+# Run Gunicorn with the Stripe webhook app
+CMD ["gunicorn", "-c", "config/gunicorn/gunicorn_stripe_config.py", "src.wsgi_stripe:app"]
