@@ -3,6 +3,8 @@ services:
     build:
       context: ../../
       dockerfile: docker/Dockerfile-bot
+    ports:
+      - "5000:5000"
     environment:
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
