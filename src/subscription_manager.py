@@ -67,6 +67,14 @@ PRODUCT_ID_TO_TIER = {
     'prod_QXNtfHzYQ2EhUx': {'tier': 'tier_6', 'tokens': 150},
 }
 
+# Mapping of product IDs to one-time purchase token amounts
+PRODUCT_ID_TO_EXTRA_TOKENS = {
+    'prod_QXmfTZh1Gn0P8L': 10,
+    'prod_QXmgiGMLNpSNZt': 25,
+    'prod_QXmiBjX9MWZtPw': 50,
+    'prod_QXmiFdyIb5mN17': 100,
+}
+
 @app.route('/stripe-webhook', methods=['POST'])
 def stripe_webhook():
     payload = request.get_data(as_text=True)
@@ -120,41 +128,49 @@ def handle_checkout_session(session):
         line_items = stripe.checkout.Session.list_line_items(session['id'])
         product_id = line_items['data'][0]['price']['product']
         tier_info = PRODUCT_ID_TO_TIER.get(product_id)
-        tier = tier_info['tier']
-        tokens = tier_info['tokens']
+        extra_tokens = PRODUCT_ID_TO_EXTRA_TOKENS.get(product_id, 0)
     except Exception as e:
         logging.error(f"Error fetching line items: {e}")
         return
 
-    if not all([user_id, guild_id, subscription_id, tier]):
+    if not all([user_id, guild_id]):
         logging.error("Missing necessary metadata")
         return
 
     try:
         with session_scope() as db_session:
             server = db_session.query(Server).filter_by(server_id=guild_id).first()
-            if server:
-                old_tokens = PRODUCT_ID_TO_TIER.get(server.tier, {}).get('tokens', 0)
-                server.owner_id = user_id
-                server.tier = tier
-                server.subscription_status = True
-                server.subscription_start_date = datetime.now(timezone.utc)
-                server.stripe_subscription_id = subscription_id
-                server.email = customer_email
-                server.verifications_count = tokens - (old_tokens - server.verifications_count)
-            else:
-                server = Server(
-                    server_id=guild_id,
-                    owner_id=user_id,
-                    tier=tier,
-                    subscription_status=True,
-                    verifications_count=tokens,
-                    subscription_start_date=datetime.now(timezone.utc),
-                    stripe_subscription_id=subscription_id,
-                    email=customer_email
-                )
-                db_session.add(server)
-            logging.info(f"Updated server {guild_id} with new subscription data")
+            if tier_info:
+                tier = tier_info['tier']
+                tokens = tier_info['tokens']
+                if server:
+                    old_tokens = PRODUCT_ID_TO_TIER.get(server.tier, {}).get('tokens', 0)
+                    server.owner_id = user_id
+                    server.tier = tier
+                    server.subscription_status = True
+                    server.subscription_start_date = datetime.now(timezone.utc)
+                    server.stripe_subscription_id = subscription_id
+                    server.email = customer_email
+                    server.verifications_count = tokens - (old_tokens - server.verifications_count)
+                else:
+                    server = Server(
+                        server_id=guild_id,
+                        owner_id=user_id,
+                        tier=tier,
+                        subscription_status=True,
+                        verifications_count=tokens,
+                        subscription_start_date=datetime.now(timezone.utc),
+                        stripe_subscription_id=subscription_id,
+                        email=customer_email
+                    )
+                    db_session.add(server)
+            elif extra_tokens:
+                if server:
+                    server.verifications_count += extra_tokens
+                else:
+                    logging.error(f"No server found for one-time purchase tokens. Server ID: {guild_id}")
+
+            logging.info(f"Updated server {guild_id} with new subscription data or added extra tokens")
     except Exception as e:
         logging.error(f"Error updating database for checkout session: {e}")
 
@@ -215,4 +231,4 @@ def handle_subscription_status(event):
         logging.error(f"Error updating database for subscription status: {e}")
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5433, debug=True)
+    app.run(host='0.0.0.0', port=5433)
