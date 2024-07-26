@@ -221,7 +221,7 @@ def handle_subscription_status(event):
                 logging.error(f"No server found with subscription ID {subscription_id}")
                 return
 
-            if status in ['canceled', 'incomplete', 'past_due']:
+            if status in ['canceled', 'unpaid', 'incomplete', 'incomplete_expired', 'past_due']:
                 server.subscription_status = False
             elif status == 'active':
                 server.subscription_status = True
@@ -231,4 +231,4 @@ def handle_subscription_status(event):
         logging.error(f"Error updating database for subscription status: {e}")
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5433)
+    app.run(port=5432)
