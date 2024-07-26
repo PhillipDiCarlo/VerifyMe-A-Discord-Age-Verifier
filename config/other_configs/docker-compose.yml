@@ -3,7 +3,7 @@ version: '3'
 services:
   discord-bot:
     build:
-      context: .
+      context: ../../
       dockerfile: docker/Dockerfile-bot
     environment:
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
@@ -17,7 +17,7 @@ services:
 
   stripe-webhook:
     build:
-      context: .
+      context: ../../
       dockerfile: docker/Dockerfile-stripe-webhook
     ports:
       - "5431:5431"
@@ -34,7 +34,7 @@ services:
 
   subscription-manager:
     build:
-      context: .
+      context: ../../
       dockerfile: docker/Dockerfile-subscription-manager
     ports:
       - "5433:5433"
