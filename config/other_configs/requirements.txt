@@ -8,3 +8,5 @@ pika
 cryptography
 pyngrok
 gunicorn
+requests
+requests-oauthlib
