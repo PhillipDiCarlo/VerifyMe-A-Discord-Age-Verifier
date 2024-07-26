@@ -310,7 +310,7 @@ async def verify(interaction: discord.Interaction):
                 await send_error_response(interaction, server_config, guild_id)
                 return
 
-            if server_config.verifications_count <= 0:
+            if server_config.verifications_count <= 0 and (not user or not user.verification_status):
                 await interaction.followup.send("This server has reached its monthly verification limit. Please contact an admin to upgrade the plan or wait until next month.", ephemeral=True)
                 return
 
@@ -335,8 +335,9 @@ async def verify(interaction: discord.Interaction):
 
         logger.debug(f"Successfully generated Stripe verification URL for user {interaction.user.id}")
 
-        # Decrement the verifications count
-        await decrement_verifications_count(guild_id)
+        # Decrement the verifications count if the user is new or not verified
+        if not user or not user.verification_status:
+            await decrement_verifications_count(guild_id)
         bot.loop.create_task(track_verification_attempt(interaction.user.id))
         bot.loop.create_task(track_command_usage(guild_id, interaction.user.id, "verify"))
 
