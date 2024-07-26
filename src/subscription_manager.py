@@ -1,35 +1,25 @@
 import os
-import logging
-from datetime import datetime, timedelta
-from contextlib import contextmanager
-
+import json
+import stripe
+from flask import Flask, request, jsonify
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
+from contextlib import contextmanager
+import logging
 
 # Load environment variables
 load_dotenv()
 
-# Set up logging
-log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
-logging.basicConfig(
-    level=getattr(logging, log_level),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
+app = Flask(__name__)
 
-# Retrieve environment variables
-DATABASE_URL = os.getenv('DATABASE_URL')
-
-# Ensure all required environment variables are set
-required_env_vars = ['DATABASE_URL']
-missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-if missing_vars:
-    raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
+# Stripe configuration
+stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
+endpoint_secret = os.getenv('STRIPE_WEBHOOK_SECRET')
 
 # Database setup
+DATABASE_URL = os.getenv('DATABASE_URL')
 engine = create_engine(DATABASE_URL)
 Base = declarative_base()
 Session = sessionmaker(bind=engine)
@@ -40,13 +30,12 @@ class Server(Base):
     id = Column(Integer, primary_key=True)
     server_id = Column(String(30), nullable=False, unique=True)
     owner_id = Column(String(30), nullable=False)
-    role_id = Column(String(30), nullable=False)
-    tier = Column(String(50), default='tier_1', nullable=False)
+    tier = Column(String(50), nullable=True)
     subscription_status = Column(Boolean, default=False)
     verifications_count = Column(Integer, default=0)
     subscription_start_date = Column(DateTime(timezone=True), nullable=True)
+    stripe_subscription_id = Column(String(255), nullable=True)
 
-# Create tables
 Base.metadata.create_all(engine)
 
 @contextmanager
@@ -55,38 +44,109 @@ def session_scope():
     try:
         yield session
         session.commit()
-    except:
+    except Exception as e:
         session.rollback()
+        logging.error(f"Error during session scope: {e}")
         raise
     finally:
         session.close()
 
-def reset_verifications_and_check_subscriptions():
-    logger.info("Starting the monthly subscription check and reset process")
-    with session_scope() as session:
-        servers = session.query(Server).all()
-        for server in servers:
-            if server.subscription_status:
-                if server.subscription_start_date:
-                    next_reset_date = server.subscription_start_date + timedelta(days=30)
-                    if datetime.now() >= next_reset_date:
-                        logger.info(f"Resetting verifications count for server {server.server_id}")
-                        server.verifications_count = 0
-                        server.subscription_start_date = next_reset_date
-                else:
-                    logger.warning(f"Server {server.server_id} does not have a subscription start date. Setting it to current date.")
-                    server.subscription_start_date = datetime.now()
+# Logging setup
+logging.basicConfig(level=logging.DEBUG)
 
-                # Check if the subscription is still active (this is a placeholder for actual subscription validation logic)
-                # Replace this with actual logic to check subscription status from your payment processor
-                if not is_subscription_active(server):
-                    logger.info(f"Setting subscription status to inactive for server {server.server_id}")
-                    server.subscription_status = False
+@app.route('/stripe-webhook', methods=['POST'])
+def stripe_webhook():
+    payload = request.get_data(as_text=True)
+    sig_header = request.headers.get('Stripe-Signature')
 
-def is_subscription_active(server):
-    # Placeholder for actual subscription validation logic
-    # Implement your logic here to check if the server's subscription is still active
-    return True
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
+    except ValueError as e:
+        # Invalid payload
+        logging.error(f"Invalid payload: {e}")
+        return jsonify({'error': 'Invalid payload'}), 400
+    except stripe.error.SignatureVerificationError as e:
+        # Invalid signature
+        logging.error(f"Invalid signature: {e}")
+        return jsonify({'error': 'Invalid signature'}), 400
+    except Exception as e:
+        # Other errors
+        logging.error(f"Error verifying webhook signature: {e}")
+        return jsonify({'error': 'Webhook verification failed'}), 400
 
-if __name__ == "__main__":
-    reset_verifications_and_check_subscriptions()
+    try:
+        # Handle the event
+        if event['type'] == 'checkout.session.completed':
+            session = event['data']['object']
+            handle_checkout_session(session)
+        elif event['type'].startswith('subscription_schedule'):
+            handle_subscription_schedule(event)
+    except Exception as e:
+        logging.error(f"Error handling webhook event: {e}")
+        return jsonify({'error': 'Error handling event'}), 500
+
+    return jsonify({'status': 'success'}), 200
+
+def handle_checkout_session(session):
+    logging.info("Handling checkout.session.completed event")
+    customer_email = session.get('customer_email')
+    metadata = session.get('metadata', {})
+    user_id = metadata.get('user_id')
+    guild_id = metadata.get('guild_id')
+    subscription_id = session.get('subscription')
+
+    # Fetch the session's line items
+    try:
+        line_items = stripe.checkout.Session.list_line_items(session['id'])
+        tier = line_items['data'][0]['price']['id']
+    except Exception as e:
+        logging.error(f"Error fetching line items: {e}")
+        return
+
+    if not all([user_id, guild_id, subscription_id, tier]):
+        logging.error("Missing necessary metadata")
+        return
+
+    try:
+        with session_scope() as db_session:
+            server = db_session.query(Server).filter_by(server_id=guild_id).first()
+            if not server:
+                server = Server(server_id=guild_id, owner_id=user_id, tier=tier, subscription_status=True, stripe_subscription_id=subscription_id)
+                db_session.add(server)
+            else:
+                server.owner_id = user_id
+                server.tier = tier
+                server.subscription_status = True
+                server.stripe_subscription_id = subscription_id
+            logging.info(f"Updated server {guild_id} with new subscription data")
+    except Exception as e:
+        logging.error(f"Error updating database for checkout session: {e}")
+
+def handle_subscription_schedule(event):
+    logging.info(f"Handling {event['type']} event")
+    schedule = event['data']['object']
+    subscription_id = schedule.get('subscription')
+    status = schedule.get('status')
+
+    if not subscription_id:
+        logging.error("Missing subscription ID in schedule event")
+        return
+
+    try:
+        with session_scope() as db_session:
+            server = db_session.query(Server).filter_by(stripe_subscription_id=subscription_id).first()
+            if not server:
+                logging.error(f"No server found with subscription ID {subscription_id}")
+                return
+
+            if event['type'] == 'subscription_schedule.canceled':
+                server.subscription_status = False
+            elif event['type'] == 'subscription_schedule.completed':
+                server.subscription_status = True
+
+            logging.info(f"Updated server {server.server_id} subscription status to {server.subscription_status}")
+    except Exception as e:
+        logging.error(f"Error updating database for subscription schedule: {e}")
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5433, debug=True)
