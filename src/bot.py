@@ -154,12 +154,12 @@ async def update_user_verification_status(discord_id, status):
                 user.verification_status = status
     await main_loop.run_in_executor(None, db_update)
 
-async def increment_verifications_count(server_id):
+async def decrement_verifications_count(server_id):
     def db_update():
         with session_scope() as session:
             server = session.query(Server).filter_by(server_id=str(server_id)).first()
-            if server:
-                server.verifications_count += 1
+            if server and server.verifications_count > 0:
+                server.verifications_count -= 1
     await main_loop.run_in_executor(None, db_update)
 
 async def reset_verifications_count():
@@ -193,7 +193,6 @@ async def assign_role(guild_id, user_id, role_id):
     try:
         await member.add_roles(role)
         logger.info(f"Successfully assigned role {role.name} to user {member.name}")
-        await increment_verifications_count(guild_id)
     except discord.Forbidden:
         logger.error(f"Bot does not have permission to assign role {role.name} in guild {guild_id}")
     except discord.HTTPException as e:
@@ -311,7 +310,7 @@ async def verify(interaction: discord.Interaction):
                 await send_error_response(interaction, server_config, guild_id)
                 return
 
-            if server_config.verifications_count >= tier_requirements[server_config.tier]:
+            if server_config.verifications_count <= 0:
                 await interaction.followup.send("This server has reached its monthly verification limit. Please contact an admin to upgrade the plan or wait until next month.", ephemeral=True)
                 return
 
@@ -336,6 +335,8 @@ async def verify(interaction: discord.Interaction):
 
         logger.debug(f"Successfully generated Stripe verification URL for user {interaction.user.id}")
 
+        # Decrement the verifications count
+        await decrement_verifications_count(guild_id)
         bot.loop.create_task(track_verification_attempt(interaction.user.id))
         bot.loop.create_task(track_command_usage(guild_id, interaction.user.id, "verify"))
 
