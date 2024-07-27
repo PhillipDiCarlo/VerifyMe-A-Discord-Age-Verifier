@@ -291,7 +291,7 @@ async def on_ready():
 
 @bot.tree.command(name="verify", description="Start the age verification process")
 async def verify(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=True)  # Acknowledge the interaction early
     logger.debug(f"Received /verify command from user {interaction.user.id} in guild {interaction.guild.id}")
 
     try:
@@ -342,21 +342,24 @@ async def verify(interaction: discord.Interaction):
             logger.debug(f"Generating Stripe verification URL for user {interaction.user.id}")
             verification_url = await generate_stripe_verification_url(guild_id, interaction.user.id, server_config.role_id, str(interaction.channel.id))
 
-        if not verification_url:
-            logger.error(f"Failed to generate Stripe verification URL for user {interaction.user.id}")
-            await interaction.followup.send("Failed to initiate the verification process. Please try again later or contact support.", ephemeral=True)
-            return
+            if not verification_url:
+                logger.error(f"Failed to generate Stripe verification URL for user {interaction.user.id}")
+                await interaction.followup.send("Failed to initiate the verification process. Please try again later or contact support.", ephemeral=True)
+                return
 
-        logger.debug(f"Successfully generated Stripe verification URL for user {interaction.user.id}")
+            logger.debug(f"Successfully generated Stripe verification URL for user {interaction.user.id}")
 
-        # Decrement the verifications count if the user is new or not verified
-        if not user or not user.verification_status:
-            await decrement_verifications_count(guild_id)
-        bot.loop.create_task(track_verification_attempt(interaction.user.id))
-        bot.loop.create_task(track_command_usage(guild_id, interaction.user.id, "verify"))
+            # Decrement the verifications count if the user is new or not verified
+            if not user or not user.verification_status:
+                await decrement_verifications_count(guild_id)
+                user.set_verification_attempt()  # Ensure this is within the session scope
+                session.add(user)  # Ensure the user object is added back to the session
 
-        await interaction.followup.send(f"Click the link below to verify your age. This link is private and should not be shared:\n\n{verification_url}", ephemeral=True)
-        logger.debug(f"Sent verification URL to user {interaction.user.id}")
+            bot.loop.create_task(track_verification_attempt(interaction.user.id))
+            bot.loop.create_task(track_command_usage(guild_id, interaction.user.id, "verify"))
+
+            await interaction.followup.send(f"Click the link below to verify your age. This link is private and should not be shared:\n\n{verification_url}", ephemeral=True)
+            logger.debug(f"Sent verification URL to user {interaction.user.id}")
 
     except Exception as e:
         logger.error(f"Unexpected error in verify command: {str(e)}", exc_info=True)
