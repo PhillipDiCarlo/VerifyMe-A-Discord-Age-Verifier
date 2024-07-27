@@ -302,7 +302,25 @@ async def verify(interaction: discord.Interaction):
             user = session.query(User).filter_by(discord_id=user_id).first()
             server_config = session.query(Server).filter_by(server_id=guild_id).first()
 
-            # Check cooldown if user exists
+            if not server_config or not server_config.role_id or not server_config.subscription_status:
+                await send_error_response(interaction, server_config, guild_id)
+                return
+
+            # Check if the user is already verified
+            if user and user.verification_status:
+                # Check if the user meets the minimum age requirement
+                if user.dob:
+                    dob_datetime = datetime.combine(user.dob, datetime.min.time(), tzinfo=timezone.utc)
+                    user_age = (datetime.now(timezone.utc) - dob_datetime).days // 365
+                    if user_age < server_config.minimum_age:
+                        await interaction.followup.send(f"You must be at least {server_config.minimum_age} years old to be added to the role.", ephemeral=True)
+                        return
+                # Assign role if age requirement is met
+                await assign_role(guild_id, interaction.user.id, server_config.role_id)
+                await interaction.followup.send("You are already verified. Your role has been assigned.", ephemeral=True)
+                return
+
+            # Check cooldown if user exists and is not verified
             if user and user.last_verification_attempt:
                 logger.debug(f"User last verification attempt (UTC): {user.last_verification_attempt}")
 
@@ -315,34 +333,12 @@ async def verify(interaction: discord.Interaction):
                     await interaction.followup.send(f"You're in a cooldown period. Please wait before attempting to verify again.", ephemeral=True)
                     return
 
-            # Proceed with verification if no cooldown or new user
-            if not server_config or not server_config.role_id or not server_config.subscription_status:
-                await send_error_response(interaction, server_config, guild_id)
-                return
-
-            # Check if the user meets the minimum age requirement
-            if user and user.dob:
-                dob_datetime = datetime.combine(user.dob, datetime.min.time(), tzinfo=timezone.utc)
-                user_age = (datetime.now(timezone.utc) - dob_datetime).days // 365
-                if user_age < server_config.minimum_age:
-                    await interaction.followup.send(f"You must be at least {server_config.minimum_age} years old to be added to the role.", ephemeral=True)
-                    return
-
-            if server_config.verifications_count <= 0 and (not user or not user.verification_status):
+            # Check if there are available verifications for the server
+            if server_config.verifications_count <= 0:
                 await interaction.followup.send("This server has reached its monthly verification limit. Please contact an admin to upgrade the plan or wait until next month.", ephemeral=True)
                 return
 
-            verification_role = interaction.guild.get_role(int(server_config.role_id))
-            if not verification_role:
-                logger.warning(f"Verification role {server_config.role_id} not found in guild {guild_id}")
-                await interaction.followup.send("The configured verification role no longer exists. Please ask an admin to set up the role again using `/set_role`.", ephemeral=True)
-                return
-
-            if user and user.verification_status:
-                await assign_role(guild_id, interaction.user.id, server_config.role_id)
-                await interaction.followup.send("You are already verified. Your role has been assigned.", ephemeral=True)
-                return
-
+            # Proceed with verification if no cooldown or new user
             logger.debug(f"Generating Stripe verification URL for user {interaction.user.id}")
             verification_url = await generate_stripe_verification_url(guild_id, interaction.user.id, server_config.role_id, str(interaction.channel.id))
 
