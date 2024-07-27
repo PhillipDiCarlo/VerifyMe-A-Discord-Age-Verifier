@@ -166,13 +166,13 @@ async def decrement_verifications_count(server_id):
                 server.verifications_count -= 1
     await main_loop.run_in_executor(None, db_update)
 
-async def reset_verifications_count():
-    def db_update():
-        with session_scope() as session:
-            servers = session.query(Server).all()
-            for server in servers:
-                server.verifications_count = 0
-    await main_loop.run_in_executor(None, db_update)
+# async def reset_verifications_count():
+#     def db_update():
+#         with session_scope() as session:
+#             servers = session.query(Server).all()
+#             for server in servers:
+#                 server.verifications_count = 0
+#     await main_loop.run_in_executor(None, db_update)
 
 async def assign_role(guild_id, user_id, role_id):
     guild = bot.get_guild(int(guild_id))
@@ -281,7 +281,7 @@ async def on_ready():
     logger.info(f'Bot is ready. Logged in as {bot.user}')
     bot.last_startup_time = datetime.now(timezone.utc)
     bot.loop.create_task(consume_queue())
-    bot.loop.create_task(reset_verifications_count())
+    # bot.loop.create_task(reset_verifications_count())
 
     try:
         synced = await bot.tree.sync()
