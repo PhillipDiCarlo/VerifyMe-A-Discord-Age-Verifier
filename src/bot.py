@@ -89,6 +89,14 @@ class User(Base):
     discord_id = Column(String(30), nullable=False)
     verification_status = Column(Boolean, default=False)
     last_verification_attempt = Column(DateTime(timezone=True))
+    dob = Column(DateTime(timezone=True), nullable=True)  # Add the dob attribute
+
+    @staticmethod
+    def get_current_time():
+        return datetime.now(timezone.utc)
+
+    def set_verification_attempt(self):
+        self.last_verification_attempt = self.get_current_time()
 
 class Server(Base):
     __tablename__ = 'servers'
@@ -165,14 +173,6 @@ async def decrement_verifications_count(server_id):
             if server and server.verifications_count > 0:
                 server.verifications_count -= 1
     await main_loop.run_in_executor(None, db_update)
-
-# async def reset_verifications_count():
-#     def db_update():
-#         with session_scope() as session:
-#             servers = session.query(Server).all()
-#             for server in servers:
-#                 server.verifications_count = 0
-#     await main_loop.run_in_executor(None, db_update)
 
 async def assign_role(guild_id, user_id, role_id):
     guild = bot.get_guild(int(guild_id))
@@ -302,21 +302,28 @@ async def verify(interaction: discord.Interaction):
             user = session.query(User).filter_by(discord_id=user_id).first()
             server_config = session.query(Server).filter_by(server_id=guild_id).first()
 
+            # Check cooldown if user exists
             if user and user.last_verification_attempt:
-                if user.last_verification_attempt < bot.last_startup_time:
-                    logger.debug(f"Resetting cooldown for user {interaction.user.id}")
-                    user.last_verification_attempt = None
-                elif is_user_in_cooldown(user.last_attempt):
+                logger.debug(f"User last verification attempt (UTC): {user.last_verification_attempt}")
+
+                current_time_utc = datetime.now(timezone.utc)
+                logger.debug(f"Current time (UTC): {current_time_utc}")
+
+                if current_time_utc - user.last_verification_attempt < timedelta(seconds=COOLDOWN_PERIOD):
+                    cooldown_end = user.last_verification_attempt + timedelta(seconds=COOLDOWN_PERIOD)
+                    logger.debug(f"User {interaction.user.id} is in cooldown period until: {cooldown_end}")
                     await interaction.followup.send(f"You're in a cooldown period. Please wait before attempting to verify again.", ephemeral=True)
                     return
 
+            # Proceed with verification if no cooldown or new user
             if not server_config or not server_config.role_id or not server_config.subscription_status:
                 await send_error_response(interaction, server_config, guild_id)
                 return
 
             # Check if the user meets the minimum age requirement
             if user and user.dob:
-                user_age = (datetime.now(timezone.utc) - user.dob).days // 365
+                dob_datetime = datetime.combine(user.dob, datetime.min.time(), tzinfo=timezone.utc)
+                user_age = (datetime.now(timezone.utc) - dob_datetime).days // 365
                 if user_age < server_config.minimum_age:
                     await interaction.followup.send(f"You must be at least {server_config.minimum_age} years old to be added to the role.", ephemeral=True)
                     return
@@ -395,10 +402,12 @@ async def track_command_usage(server_id, user_id, command):
     except Exception as e:
         logger.error(f"Error tracking command usage for user {user_id}: {str(e)}", exc_info=True)
 
-def is_user_in_cooldown(last_attempt):
-    if last_attempt:
-        cooldown_end = last_attempt + timedelta(seconds=COOLDOWN_PERIOD)
-        return datetime.now(timezone.utc) < cooldown_end
+def is_user_in_cooldown(last_verification_attempt):
+    if last_verification_attempt:
+        cooldown_end = last_verification_attempt + timedelta(seconds=COOLDOWN_PERIOD)
+        current_time_utc = datetime.now(timezone.utc)
+        logger.debug(f"Current time: {current_time_utc}, Cooldown end time: {cooldown_end}")
+        return current_time_utc < cooldown_end
     return False
 
 async def send_error_response(interaction, server_config, guild_id):
