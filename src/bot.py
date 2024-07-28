@@ -349,13 +349,13 @@ async def verify(interaction: discord.Interaction):
 
             logger.debug(f"Successfully generated Stripe verification URL for user {interaction.user.id}")
 
-            # Decrement the verifications count if the user is new or not verified
-            if not user or not user.verification_status:
-                await decrement_verifications_count(guild_id)
-                user.set_verification_attempt()  # Ensure this is within the session scope
-                session.add(user)  # Ensure the user object is added back to the session
+            # Track verification attempt for cooldown purposes
+            if not user:
+                user = User(discord_id=user_id, verification_status=False)
+                session.add(user)
+            user.set_verification_attempt()
+            session.commit()
 
-            bot.loop.create_task(track_verification_attempt(interaction.user.id))
             bot.loop.create_task(track_command_usage(guild_id, interaction.user.id, "verify"))
 
             await interaction.followup.send(f"Click the link below to verify your age. This link is private and should not be shared:\n\n{verification_url}", ephemeral=True)
