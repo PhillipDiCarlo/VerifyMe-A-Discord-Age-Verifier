@@ -263,6 +263,7 @@ def handle_subscription_status(event):
                     if tier_info:
                         tokens = tier_info['tokens']
                         server.verifications_count = tokens  # Reset the verifications count
+                        server.subscription_start_date = datetime.now(timezone.utc)  # Update subscription start date
 
             logging.info(f"Updated server {server.server_id} subscription status to {server.subscription_status}")
     except Exception as e:
