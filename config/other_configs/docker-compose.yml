@@ -43,3 +43,8 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
       - STRIPE_PAYMENT_WEBHOOK_SECRET=${STRIPE_PAYMENT_WEBHOOK_SECRET}
+  
+  subscription-checker:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile-subscription-checker
