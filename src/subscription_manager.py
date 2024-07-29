@@ -115,7 +115,7 @@ def process_event(event):
         if event['type'] == 'checkout.session.completed':
             session = event['data']['object']
             handle_checkout_session(session)
-        elif event['type'] in ['invoice.payment_failed', 'customer.subscription.updated']:
+        elif event['type'] in ['invoice.payment_failed', 'customer.subscription.updated', 'invoice.payment_succeeded']:
             handle_subscription_status(event)
         elif event['type'].startswith('subscription_schedule'):
             handle_subscription_schedule(event)
@@ -149,6 +149,9 @@ def handle_checkout_session(session):
     try:
         with session_scope() as db_session:
             server = db_session.query(Server).filter_by(server_id=guild_id).first()
+            if not server:
+                server = db_session.query(Server).filter_by(stripe_subscription_id=subscription_id).first()
+            
             if tier_info:
                 tier = tier_info['tier']
                 tokens = tier_info['tokens']
@@ -235,7 +238,8 @@ def handle_subscription_status(event):
 
     try:
         with session_scope() as db_session:
-            server = db_session.query(Server).filter_by(stripe_subscription_id=subscription_id).first()
+            server = db_session.query(Server).filter((Server.server_id == subscription['metadata'].get('discordserverid')) | 
+                                                     (Server.stripe_subscription_id == subscription_id)).first()
             if not server:
                 logging.error(f"No server found with subscription ID {subscription_id}")
                 return
@@ -245,15 +249,20 @@ def handle_subscription_status(event):
             elif status == 'active':
                 server.subscription_status = True
 
-                # Update tier and verification tokens if tier_info is available
-                if tier_info:
-                    old_tokens = PRODUCT_ID_TO_TIER.get(server.tier, {}).get('tokens', 0)
-                    server.tier = tier_info['tier']
-                    tokens = tier_info['tokens']
-                    if tokens >= old_tokens:
-                        server.verifications_count = tokens - (old_tokens - server.verifications_count)
-                    else:
-                        server.verifications_count = tokens
+                # Reset or update verification tokens based on the event type
+                if event['type'] == 'customer.subscription.updated':
+                    if tier_info:
+                        old_tokens = PRODUCT_ID_TO_TIER.get(server.tier, {}).get('tokens', 0)
+                        server.tier = tier_info['tier']
+                        tokens = tier_info['tokens']
+                        if tokens >= old_tokens:
+                            server.verifications_count = tokens - (old_tokens - server.verifications_count)
+                        else:
+                            server.verifications_count = tokens
+                elif event['type'] == 'invoice.payment_succeeded':
+                    if tier_info:
+                        tokens = tier_info['tokens']
+                        server.verifications_count = tokens  # Reset the verifications count
 
             logging.info(f"Updated server {server.server_id} subscription status to {server.subscription_status}")
     except Exception as e:
