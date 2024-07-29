@@ -129,7 +129,7 @@ def handle_checkout_session(session):
     
     # Extract custom fields
     user_id = next((field['text']['value'] for field in custom_fields if field['key'] == 'discorduseridnotyourusername'), None)
-    guild_id = next((field['text']['value'] for field in custom_fields if field['key'] == 'discordserverid'), None)
+    guild_id = next((field['text']['value'] for field in custom_fields if field['key'] in ['discordserverid', 'discordserveridnotservername']), None)
     subscription_id = session.get('subscription')
 
     # Fetch the session's line items
@@ -160,7 +160,12 @@ def handle_checkout_session(session):
                     server.subscription_start_date = datetime.now(timezone.utc)
                     server.stripe_subscription_id = subscription_id
                     server.email = customer_email
-                    server.verifications_count = tokens - (old_tokens - server.verifications_count)
+
+                    # Reset the verification count if it's a new subscription or upgrade
+                    if tokens >= old_tokens:
+                        server.verifications_count = tokens - (old_tokens - server.verifications_count)
+                    else:
+                        server.verifications_count = tokens
                 else:
                     server = Server(
                         server_id=guild_id,
@@ -218,6 +223,11 @@ def handle_subscription_status(event):
     subscription = event['data']['object']
     subscription_id = subscription.get('id')
     status = subscription.get('status')
+    items = subscription.get('items', {}).get('data', [])
+    
+    # Extract product_id from subscription items
+    product_id = items[0]['plan']['product'] if items else None
+    tier_info = PRODUCT_ID_TO_TIER.get(product_id)
 
     if not subscription_id:
         logging.error("Missing subscription ID in status event")
@@ -234,6 +244,16 @@ def handle_subscription_status(event):
                 server.subscription_status = False
             elif status == 'active':
                 server.subscription_status = True
+
+                # Update tier and verification tokens if tier_info is available
+                if tier_info:
+                    old_tokens = PRODUCT_ID_TO_TIER.get(server.tier, {}).get('tokens', 0)
+                    server.tier = tier_info['tier']
+                    tokens = tier_info['tokens']
+                    if tokens >= old_tokens:
+                        server.verifications_count = tokens - (old_tokens - server.verifications_count)
+                    else:
+                        server.verifications_count = tokens
 
             logging.info(f"Updated server {server.server_id} subscription status to {server.subscription_status}")
     except Exception as e:
