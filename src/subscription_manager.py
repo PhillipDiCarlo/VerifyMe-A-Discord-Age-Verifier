@@ -1,6 +1,7 @@
 import os
 import json
 import stripe
+import threading
 from flask import Flask, request, jsonify
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
@@ -103,8 +104,14 @@ def stripe_webhook():
         logging.error(f"Error verifying webhook signature: {e}")
         return jsonify({'error': 'Webhook verification failed'}), 400
 
+    # Process the event asynchronously
+    thread = threading.Thread(target=process_event, args=(event,))
+    thread.start()
+
+    return jsonify({'status': 'success'}), 200
+
+def process_event(event):
     try:
-        # Handle the event
         if event['type'] == 'checkout.session.completed':
             session = event['data']['object']
             handle_checkout_session(session)
@@ -114,9 +121,6 @@ def stripe_webhook():
             handle_subscription_schedule(event)
     except Exception as e:
         logging.error(f"Error handling webhook event: {e}")
-        return jsonify({'error': 'Error handling event'}), 500
-
-    return jsonify({'status': 'success'}), 200
 
 def handle_checkout_session(session):
     logging.info("Handling checkout.session.completed event")
@@ -124,7 +128,7 @@ def handle_checkout_session(session):
     custom_fields = session.get('custom_fields', [])
     
     # Extract custom fields
-    user_id = next((field['text']['value'] for field in custom_fields if field['key'] == 'discorduserid'), None)
+    user_id = next((field['text']['value'] for field in custom_fields if field['key'] == 'discorduseridnotyourusername'), None)
     guild_id = next((field['text']['value'] for field in custom_fields if field['key'] == 'discordserverid'), None)
     subscription_id = session.get('subscription')
 
