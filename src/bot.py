@@ -289,7 +289,7 @@ async def on_ready():
     except Exception as e:
         logger.error(f"Failed to sync commands: {e}")
 
-@bot.tree.command(name="verify", description="Start the age verification process")
+@bot.tree.command(name="verifyme", description="Start the age verification process")
 async def verify(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)  # Acknowledge the interaction early
     logger.debug(f"Received /verify command from user {interaction.user.id} in guild {interaction.guild.id}")
