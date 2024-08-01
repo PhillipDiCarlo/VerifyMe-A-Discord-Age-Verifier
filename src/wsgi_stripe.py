@@ -1,3 +1,4 @@
-from stripe_webhook_service import app
+from src.stripe_webhook_service import app
 
-app = app
+if __name__ == "__main__":
+    app.run()

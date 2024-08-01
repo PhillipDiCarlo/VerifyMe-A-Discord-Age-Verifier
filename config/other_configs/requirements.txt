@@ -2,9 +2,12 @@ discord.py
 Flask
 python-dotenv
 SQLAlchemy
-psycopg2
+psycopg2-binary
 stripe
 pika
 cryptography
 pyngrok
 gunicorn
+requests
+requests-oauthlib
+APScheduler

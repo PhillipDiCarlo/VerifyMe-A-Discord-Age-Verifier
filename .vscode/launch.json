@@ -1,6 +1,8 @@
 {
     "version": "0.2.0",
     "configurations": [
+
+
         {
             "name": "Flask: Run Server",
             "type": "debugpy",
@@ -18,6 +20,28 @@
             "request": "launch",
             "program": "${workspaceFolder}/src/bot.py",
             "console": "integratedTerminal"
+        },
+        {
+            "name": "Flask: Discord Login",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/discord_login_for_checkout.py",
+            "console": "integratedTerminal",
+            "env": {
+                "FLASK_APP": "src/discord_login_for_checkout",
+                "FLASK_ENV": "development"
+            }
+        },
+        {
+            "name": "Flask: Stripe Subcription Webhook",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/subscription_manager.py",
+            "console": "integratedTerminal",
+            "env": {
+                "FLASK_APP": "src/subscription_manager",
+                "FLASK_ENV": "development"
+            }
         }
     ]
 }

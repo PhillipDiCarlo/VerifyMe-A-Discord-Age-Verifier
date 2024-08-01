@@ -1,7 +1,6 @@
 bind = "0.0.0.0:5431"
-workers = 1
-worker_class = "sync"
+workers = 2
 timeout = 120
-loglevel = "info"
+loglevel = "warning"
 errorlog = "-"
 accesslog = "-"

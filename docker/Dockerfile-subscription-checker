@@ -1,0 +1,17 @@
+# Use an official Python runtime as a parent image
+FROM python:3.10-slim
+
+# Set the working directory
+WORKDIR /app
+
+# Copy the requirements file first to leverage Docker cache
+COPY config/other_configs/requirements.txt requirements.txt
+
+# Install any needed packages specified in requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the entire project
+COPY src/ src/
+
+# Run subscription_checker.py when the container launches
+CMD ["python", "src/subscription_checker.py"]

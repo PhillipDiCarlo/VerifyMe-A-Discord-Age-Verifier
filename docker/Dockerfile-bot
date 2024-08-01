@@ -1,13 +1,25 @@
-FROM python:3.8-slim
+# Dockerfile-bot
 
+# Use an official Python runtime as a parent image
+FROM python:3.10-slim
+
+# Set the working directory in the container
 WORKDIR /app
 
-COPY requirements.txt requirements.txt
-RUN pip install -r requirements.txt
+COPY config/other_configs/requirements.txt requirements.txt
 
-COPY bot.py wsgi_bot.py /app/
+# Install any needed packages specified in requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "wsgi_bot:app"]
+# Copy the entire project
+COPY src/ src/
+
+# Expose the port
+EXPOSE 5000
+
+# Run bot.py when the container launches
+CMD ["python", "src/bot.py"]
+
 
 
 # docker build -t discord-age-verification-service -f Dockerfile-bot .

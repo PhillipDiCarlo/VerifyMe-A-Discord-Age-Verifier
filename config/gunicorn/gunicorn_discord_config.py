@@ -1,7 +1,7 @@
 bind = "0.0.0.0:5000"
 workers = 1
-worker_class = "asyncio"
+worker_class = "sync"
 timeout = 120
-loglevel = "info"
+loglevel = "warning"
 errorlog = "-"
 accesslog = "-"
