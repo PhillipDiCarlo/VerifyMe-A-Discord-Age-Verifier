@@ -281,7 +281,10 @@ async def on_ready():
     logger.info(f'Bot is ready. Logged in as {bot.user}')
     bot.last_startup_time = datetime.now(timezone.utc)
     bot.loop.create_task(consume_queue())
-    # bot.loop.create_task(reset_verifications_count())
+    
+    # Set the bot's bio/status
+    bio_message = "Use `/get_verify_bot` to add this bot to your discord."
+    await bot.change_presence(activity=discord.Game(name=bio_message))
 
     try:
         synced = await bot.tree.sync()
@@ -445,6 +448,13 @@ async def set_role(interaction: discord.Interaction, role: discord.Role, minimum
 
     await interaction.response.send_message(f"Verification role set to: {role.name} with minimum age {minimum_age}", ephemeral=True)
 
+@bot.tree.command(name="get_verify_bot", description="Get the link to add this bot to your server")
+async def get_verify_bot(interaction: discord.Interaction):
+    message = (
+        "Click the link to add this bot to your server: "
+        "[Age Verification Solution](https://esattotech.com/age-verification-solution/)"
+    )
+    await interaction.response.send_message(message, ephemeral=True)
 
 @bot.tree.command(name="get_subscription", description="Get the subscription link for the server")
 async def get_subscription(interaction: discord.Interaction):
