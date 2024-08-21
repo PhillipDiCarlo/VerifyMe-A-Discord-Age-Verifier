@@ -477,14 +477,16 @@ async def server_info(interaction: discord.Interaction):
             return
 
         verification_role = interaction.guild.get_role(int(server_config.role_id)) if server_config.role_id else None
+        tier = server_config.tier
+        max_verifications = tier_requirements.get(tier, "Tier not set")  # Provide a default value if tier is None
 
         embed = discord.Embed(title="Server Verification Configuration", color=discord.Color.blue())
         embed.add_field(name="Verification Role", value=verification_role.name if verification_role else "Not set", inline=False)
         embed.add_field(name="Server's Minimum Age", value=server_config.minimum_age, inline=False)
-        embed.add_field(name="Subscription Tier", value=server_config.tier, inline=True)
+        embed.add_field(name="Subscription Tier", value=tier if tier else "Not set", inline=True)
         embed.add_field(name="Subscription Status", value="Active" if server_config.subscription_status else "Inactive", inline=True)
         embed.add_field(name="Verifications Remaining", value=str(server_config.verifications_count), inline=True)
-        embed.add_field(name="Max Verifications/Month", value=str(tier_requirements[server_config.tier]), inline=True)
+        embed.add_field(name="Max Verifications/Month", value=str(max_verifications), inline=True)
 
         if server_config.verifications_count == 0:
             embed.add_field(name="Warning", value="You have reached the maximum number of verifications for this month.", inline=False)
