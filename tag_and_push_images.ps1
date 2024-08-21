@@ -7,11 +7,13 @@ if (-not $version) {
     exit 1
 }
 
-# Tag the images
+# Tag the images with the specified version
 docker tag verifyme-subscription-manager italiandogs/verifyme-subscription-manager:$version
 docker tag verifyme-stripe-webhook italiandogs/verifyme-stripe-webhook:$version
 docker tag verifyme-discord-bot italiandogs/verifyme-discord-bot:$version
 docker tag verifyme-subscription-checker italiandogs/verifyme-subscription-checker:$version
+
+# Tag the images with the latest tag\
 docker tag verifyme-subscription-manager italiandogs/verifyme-subscription-manager:latest
 docker tag verifyme-stripe-webhook italiandogs/verifyme-stripe-webhook:latest
 docker tag verifyme-discord-bot italiandogs/verifyme-discord-bot:latest
