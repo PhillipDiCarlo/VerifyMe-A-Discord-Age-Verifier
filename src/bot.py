@@ -1,3 +1,4 @@
+import hashlib
 import os
 import json
 import asyncio
@@ -10,9 +11,10 @@ from discord import app_commands
 from dotenv import load_dotenv
 import pika
 import stripe
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from cryptography.fernet import Fernet
 
 # Load environment variables
 load_dotenv()
@@ -83,14 +85,35 @@ tier_requirements = {
 # Cooldown period (seconds)
 COOLDOWN_PERIOD = 60  # 1 minute cooldown for demonstration purposes
 
-# Define SQLAlchemy models
+# Encryption/Decryption setup
+DOB_KEY = os.getenv('DOB_KEY')
+if not DOB_KEY:
+    raise ValueError("DOB_KEY not found in environment variables")
+
+cipher = Fernet(DOB_KEY)
+
+# Hashing function for the DOB
+def encrypt_dob(dob: datetime) -> str:
+    """Encrypt the date of birth using Fernet symmetric encryption."""
+    dob_str = dob.strftime('%Y-%m-%d')  # Convert DOB to string
+    dob_bytes = dob_str.encode('utf-8')  # Convert to bytes
+    encrypted_dob = cipher.encrypt(dob_bytes)  # Encrypt the DOB
+    return encrypted_dob.decode('utf-8')  # Return encrypted DOB as string
+
+def decrypt_dob(encrypted_dob: str) -> datetime:
+    """Decrypt the encrypted DOB back to a datetime object."""
+    dob_bytes = cipher.decrypt(encrypted_dob.encode('utf-8'))  # Decrypt the DOB
+    dob_str = dob_bytes.decode('utf-8')  # Convert bytes back to string
+    return datetime.strptime(dob_str, '%Y-%m-%d')  # Convert string to datetime object
+
+# Modify User model to store the encrypted DOB
 class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True)
     discord_id = Column(String(30), nullable=False)
     verification_status = Column(Boolean, default=False)
     last_verification_attempt = Column(DateTime(timezone=True))
-    dob = Column(DateTime(timezone=True), nullable=True)  # Add the dob attribute
+    dob = Column(String(255), nullable=True)  # Store encrypted DOB
 
     @staticmethod
     def get_current_time():
@@ -319,18 +342,25 @@ async def verify(interaction: discord.Interaction):
                     return
                 else:
                     # New users cannot verify in tier_0
-                    await interaction.followup.send("This tier does not support new user verification. Please contact The server owner or admin for assistance.", ephemeral=True)
+                    await interaction.followup.send("This tier does not support new user verification. Please contact the server owner or admin for assistance.", ephemeral=True)
                     return
 
             # Check if the user is already verified
             if user and user.verification_status:
-                # Check if the user meets the minimum age requirement
+                # Decrypt the DOB to verify the age requirement
                 if user.dob:
-                    dob_datetime = datetime.combine(user.dob, datetime.min.time(), tzinfo=timezone.utc)
-                    user_age = (datetime.now(timezone.utc) - dob_datetime).days // 365
+                    decrypted_dob = decrypt_dob(user.dob)  # Decrypt the stored DOB
+                    
+                    # Make the decrypted_dob timezone-aware (UTC)
+                    decrypted_dob = decrypted_dob.replace(tzinfo=timezone.utc)
+                    
+                    # Calculate the user's age
+                    user_age = (datetime.now(timezone.utc) - decrypted_dob).days // 365
+                    
                     if user_age < server_config.minimum_age:
                         await interaction.followup.send(f"You must be at least {server_config.minimum_age} years old to be added to the role.", ephemeral=True)
                         return
+
                 # Assign role if age requirement is met
                 await assign_role(guild_id, interaction.user.id, server_config.role_id)
                 await interaction.followup.send("You are already verified. Your role has been assigned.", ephemeral=True)
