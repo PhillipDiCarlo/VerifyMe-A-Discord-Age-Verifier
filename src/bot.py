@@ -71,6 +71,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 
 # Subscription tier requirements
 tier_requirements = {
+    "tier_0": 0,
     "tier_1": 10,
     "tier_2": 25,
     "tier_3": 50,
@@ -308,6 +309,18 @@ async def verify(interaction: discord.Interaction):
             if not server_config or not server_config.role_id or not server_config.subscription_status:
                 await send_error_response(interaction, server_config, guild_id)
                 return
+
+            # Check if the server is on tier_0
+            if server_config.tier == "tier_0":
+                if user and user.verification_status:
+                    # User is already verified, assign the role
+                    await assign_role(guild_id, interaction.user.id, server_config.role_id)
+                    await interaction.followup.send("You are already verified. Your role has been assigned.", ephemeral=True)
+                    return
+                else:
+                    # New users cannot verify in tier_0
+                    await interaction.followup.send("This tier does not support new user verification. Please contact The server owner or admin for assistance.", ephemeral=True)
+                    return
 
             # Check if the user is already verified
             if user and user.verification_status:

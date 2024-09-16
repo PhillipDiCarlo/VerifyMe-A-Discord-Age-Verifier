@@ -65,6 +65,7 @@ logging.basicConfig(
 
 # Mapping of product IDs to tiers and their corresponding verification tokens
 PRODUCT_ID_TO_TIER = {
+    'prod_QrCgveExowX4SZ': {'tier': 'tier_0', 'tokens': 0},
     'prod_QXNi63ixsJYIke': {'tier': 'tier_1', 'tokens': 10},
     'prod_QXNldB600Dr8RX': {'tier': 'tier_2', 'tokens': 25},
     'prod_QXNnv5WYeieAGZ': {'tier': 'tier_3', 'tokens': 50},
