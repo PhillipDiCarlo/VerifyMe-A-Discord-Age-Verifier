@@ -130,7 +130,7 @@ def handle_checkout_session(session):
     
     # Extract custom fields
     user_id = next((field['text']['value'] for field in custom_fields if field['key'] == 'discorduseridnotyourusername'), None)
-    guild_id = next((field['text']['value'] for field in custom_fields if field['key'] in ['discordserverid', 'discordserveridnotyourservername']), None)
+    guild_id = next((field['text']['value'] for field in custom_fields if field['key'] in ['discordserverid', 'discordserveridnotyourservername', 'discordserveridnotservername']), None)                                                                                                            
     subscription_id = session.get('subscription')
 
     # Fetch the session's line items
