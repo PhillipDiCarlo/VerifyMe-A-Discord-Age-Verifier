@@ -130,7 +130,7 @@ def handle_checkout_session(session):
     
     # Extract custom fields
     user_id = next((field['text']['value'] for field in custom_fields if field['key'] == 'discorduseridnotyourusername'), None)
-    guild_id = next((field['text']['value'] for field in custom_fields if field['key'] in ['discordserverid', 'discordserveridnotservername']), None)
+    guild_id = next((field['text']['value'] for field in custom_fields if field['key'] in ['discordserverid', 'discordserveridnotyourservername']), None)
     subscription_id = session.get('subscription')
 
     # Fetch the session's line items
@@ -144,7 +144,7 @@ def handle_checkout_session(session):
         return
 
     if not all([user_id, guild_id]):
-        logging.error("Missing necessary metadata")
+        logging.error(f"Missing necessary metadata: user_id={user_id}, guild_id={guild_id}")
         return
 
     try:
