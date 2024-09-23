@@ -66,12 +66,12 @@ logging.basicConfig(
 # Mapping of product IDs to tiers and their corresponding verification tokens
 PRODUCT_ID_TO_TIER = {
     'prod_QrCgveExowX4SZ': {'tier': 'tier_0', 'tokens': 0},
-    'prod_QXNi63ixsJYIke': {'tier': 'tier_1', 'tokens': 10},
-    'prod_QXNldB600Dr8RX': {'tier': 'tier_2', 'tokens': 25},
-    'prod_QXNnv5WYeieAGZ': {'tier': 'tier_3', 'tokens': 50},
-    'prod_QXNpnlGsJn210K': {'tier': 'tier_4', 'tokens': 75},
-    'prod_QXNrATAgXjN7Xi': {'tier': 'tier_5', 'tokens': 100},
-    'prod_QXNtfHzYQ2EhUx': {'tier': 'tier_6', 'tokens': 150},
+    'prod_QtuUxwu41WzrPw': {'tier': 'tier_1', 'tokens': 10},
+    'prod_QtuVxykbkplAZw': {'tier': 'tier_2', 'tokens': 25},
+    'prod_QtuWzcaMquctfT': {'tier': 'tier_3', 'tokens': 50},
+    'prod_QtuXjrcE0cIlLG': {'tier': 'tier_4', 'tokens': 75},
+    'prod_QtuYXFfzpKS29k': {'tier': 'tier_5', 'tokens': 100},
+    'prod_QtuYlkTvZ0181h': {'tier': 'tier_6', 'tokens': 150},
 }
 
 # Mapping of product IDs to one-time purchase token amounts
