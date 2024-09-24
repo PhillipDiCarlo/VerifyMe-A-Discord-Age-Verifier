@@ -306,9 +306,9 @@ async def on_ready():
     bot.last_startup_time = datetime.now(timezone.utc)
     bot.loop.create_task(consume_queue())
     
-    # Set the bot's bio/status
-    bio_message = "Use `/get_verify_bot` to add this bot to your discord."
-    await bot.change_presence(activity=discord.Game(name=bio_message))
+    # # Set the bot's bio/status
+    # bio_message = "Use `/get_verify_bot` to add this bot to your discord."
+    # await bot.change_presence(activity=discord.Game(name=bio_message))
 
     try:
         synced = await bot.tree.sync()
@@ -457,17 +457,17 @@ def is_user_in_cooldown(last_verification_attempt):
 
 async def send_error_response(interaction, server_config, guild_id):
     if not server_config:
-        await interaction.followup.send("This server is not configured for verification. Please ask an admin to set up the server using `/set_role`.", ephemeral=True)
+        await interaction.followup.send("This server is not configured for verification. Please ask an admin to set up the server using `/setupverify`.", ephemeral=True)
     elif not server_config.role_id:
         logger.warning(f"No verification role set for guild {guild_id}")
-        await interaction.followup.send("The verification role has not been set for this server. Please ask an admin to set up the role using `/set_role`.", ephemeral=True)
+        await interaction.followup.send("The verification role has not been set for this server. Please ask an admin to set up the role using `/setupverify`.", ephemeral=True)
     elif not server_config.subscription_status:
         logger.warning(f"No active subscription for guild {guild_id}")
         await interaction.followup.send("This server does not have an active verification subscription.", ephemeral=True)
 
-@bot.tree.command(name="set_role", description="Set the role and minimum age for verified users")
+@bot.tree.command(name="setupverify", description="Set the role and minimum age for verified users")
 @app_commands.describe(role="The role to assign to verified users", minimum_age="The minimum age required for verification")
-async def set_role(interaction: discord.Interaction, role: discord.Role, minimum_age: int):
+async def setupVerify(interaction: discord.Interaction, role: discord.Role, minimum_age: int):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
@@ -516,7 +516,7 @@ async def server_info(interaction: discord.Interaction):
         server_config = session.query(Server).filter_by(server_id=guild_id).first()
 
         if not server_config:
-            await interaction.response.send_message("This server is not configured for verification. Please type /set_role to configure.", ephemeral=True)
+            await interaction.response.send_message("This server is not configured for verification. Please type /setupverify to configure.", ephemeral=True)
             return
 
         verification_role = interaction.guild.get_role(int(server_config.role_id)) if server_config.role_id else None
@@ -536,8 +536,8 @@ async def server_info(interaction: discord.Interaction):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="subscription_status", description="Show detailed information about the server's verification subscription")
-@app_commands.checks.has_permissions(administrator=True)
+# @bot.tree.command(name="subscription_status", description="Show detailed information about the server's verification subscription")
+# @app_commands.checks.has_permissions(administrator=True)
 async def subscription_status(interaction: discord.Interaction):
     guild_id = str(interaction.guild.id)
 
@@ -561,28 +561,28 @@ async def subscription_status(interaction: discord.Interaction):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="verification_logs", description="View recent verification actions")
-@app_commands.checks.has_permissions(administrator=True)
-async def verification_logs(interaction: discord.Interaction, limit: int = 10):
-    guild_id = str(interaction.guild.id)
+# @bot.tree.command(name="verification_logs", description="View recent verification actions")
+# @app_commands.checks.has_permissions(administrator=True)
+# async def verification_logs(interaction: discord.Interaction, limit: int = 10):
+#     guild_id = str(interaction.guild.id)
     
-    with session_scope() as session:
-        logs = session.query(CommandUsage).filter_by(server_id=guild_id).order_by(CommandUsage.timestamp.desc()).limit(limit).all()
+#     with session_scope() as session:
+#         logs = session.query(CommandUsage).filter_by(server_id=guild_id).order_by(CommandUsage.timestamp.desc()).limit(limit).all()
 
-    if not logs:
-        await interaction.response.send_message("No verification logs found for this server.", ephemeral=True)
-        return
+#     if not logs:
+#         await interaction.response.send_message("No verification logs found for this server.", ephemeral=True)
+#         return
 
-    embed = discord.Embed(title="Recent Verification Actions", color=discord.Color.blue())
+#     embed = discord.Embed(title="Recent Verification Actions", color=discord.Color.blue())
     
-    for log in logs:
-        user = interaction.guild.get_member(int(log.user_id))
-        user_name = user.name if user else f"Unknown User ({log.user_id})"
-        embed.add_field(name=f"{log.command} - {log.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
-                        value=f"User: {user_name}",
-                        inline=False)
+#     for log in logs:
+#         user = interaction.guild.get_member(int(log.user_id))
+#         user_name = user.name if user else f"Unknown User ({log.user_id})"
+#         embed.add_field(name=f"{log.command} - {log.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
+#                         value=f"User: {user_name}",
+#                         inline=False)
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+#     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="ping", description="Check if the bot is responsive")
 async def ping(interaction: discord.Interaction):
