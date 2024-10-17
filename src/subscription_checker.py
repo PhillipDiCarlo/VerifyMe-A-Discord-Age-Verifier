@@ -12,7 +12,7 @@ from contextlib import contextmanager
 load_dotenv()
 
 # Database setup
-DATABASE_URL = os.getenv('DATABASE_URL')
+DATABASE_URL = os.getenv('DATABASE_URL_VERIFICATION')
 engine = create_engine(DATABASE_URL)
 Base = declarative_base()
 Session = sessionmaker(bind=engine)

@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 # Retrieve environment variables
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
-DATABASE_URL = os.getenv('DATABASE_URL')
+DATABASE_URL = os.getenv('DATABASE_URL_VERIFICATION')
+
 
 # RabbitMQ Configuration
 RABBITMQ_HOST = os.getenv('RABBITMQ_HOST')
