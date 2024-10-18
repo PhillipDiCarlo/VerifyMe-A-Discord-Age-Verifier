@@ -43,7 +43,7 @@ RABBITMQ_VHOST = os.getenv('RABBITMQ_VHOST', '/')
 RABBITMQ_QUEUE_NAME = os.getenv('RABBITMQ_QUEUE_NAME', 'verification_results')
 
 # Ensure all required environment variables are set
-required_env_vars = ['DISCORD_BOT_TOKEN', 'STRIPE_SECRET_KEY', 'DATABASE_URL', 
+required_env_vars = ['DISCORD_BOT_TOKEN', 'STRIPE_SECRET_KEY', 'DATABASE_URL_VERIFICATION', 
                      'RABBITMQ_HOST', 'RABBITMQ_USERNAME', 'RABBITMQ_PASSWORD']
 missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 if missing_vars:
