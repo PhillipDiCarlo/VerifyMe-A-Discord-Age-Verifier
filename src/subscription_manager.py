@@ -95,6 +95,14 @@ PRODUCT_ID_TO_TIER = {
     'prod_QtuYlkTvZ0181h': {'tier': 'tier_6', 'tokens': 150},
 }
 
+# Mapping of product IDs to one-time purchase token amounts
+PRODUCT_ID_TO_EXTRA_TOKENS = {
+    'prod_QXmfTZh1Gn0P8L': 10,
+    'prod_QXmgiGMLNpSNZt': 25,
+    'prod_QXmiBjX9MWZtPw': 50,
+    'prod_QXmiFdyIb5mN17': 100,
+}
+
 @app.route('/stripe-webhook', methods=['POST'])
 def stripe_webhook():
     payload = request.get_data(as_text=True)
@@ -105,10 +113,20 @@ def stripe_webhook():
 
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
+    except ValueError as e:
+        # Invalid payload
+        logging.error(f"Invalid payload: {e}")
+        return jsonify({'error': 'Invalid payload'}), 400
+    except stripe.error.SignatureVerificationError as e:
+        # Invalid signature
+        logging.error(f"Invalid signature: {e}")
+        return jsonify({'error': 'Invalid signature'}), 400
     except Exception as e:
-        logging.error(f"Error verifying webhook: {e}")
+        # Other errors
+        logging.error(f"Error verifying webhook signature: {e}")
         return jsonify({'error': 'Webhook verification failed'}), 400
 
+    # Process the event asynchronously
     thread = threading.Thread(target=process_event, args=(event,))
     thread.start()
 
@@ -149,9 +167,16 @@ def process_event(event):
 
 
 def handle_verification_checkout_session(session):
-    guild_id = session['metadata'].get('guild_id')
-    discord_id = session['metadata'].get('discord_id')
-    product_id = session['metadata'].get('product_id')
+    logging.info("Handling checkout.session.completed event")
+    customer_email = session['customer_details'].get('email')
+    custom_fields = session.get('custom_fields', [])
+
+    guild_id = next((field['text']['value'] for field in custom_fields if field['key'] in ['discordserverid', 'discordserveridnotyourservername', 'discordserveridnotservername']), None)
+    discord_id = next((field['text']['value'] for field in custom_fields if field['key'] == 'discorduseridnotyourusername'), None)
+    subscription_id = session.get('subscription')
+
+    line_items = stripe.checkout.Session.list_line_items(session['id'])
+    product_id = line_items['data'][0]['price']['product']
     tier_info = PRODUCT_ID_TO_TIER.get(product_id)
 
     if not guild_id or not discord_id or not tier_info:
@@ -159,30 +184,43 @@ def handle_verification_checkout_session(session):
         return
 
     try:
-        with session_scope('verification') as db_session:
-            server = db_session.query(Server).filter_by(server_id=guild_id).first()
-            if server:
-                server.tier = tier_info['tier']
-                server.subscription_status = True
-                server.verifications_count += tier_info['tokens']
-                server.subscription_start_date = datetime.now(timezone.utc)
-                server.stripe_subscription_id = session.get('subscription')
-                server.role_id = session['metadata'].get('role_id')
-                server.email = session['customer_details'].get('email')
-            else:
-                server = Server(
-                    server_id=guild_id,
-                    owner_id=discord_id,
-                    tier=tier_info['tier'],
-                    subscription_status=True,
-                    verifications_count=tier_info['tokens'],
-                    subscription_start_date=datetime.now(timezone.utc),
-                    stripe_subscription_id=session.get('subscription'),
-                    role_id=session['metadata'].get('role_id'),
-                    email=session['customer_details'].get('email')
-                )
-                db_session.add(server)
-            logging.info(f"Updated verification subscription for guild {guild_id}.")
+        # line_items = stripe.checkout.Session.list_line_items(session['id'])
+        # product_id = line_items['data'][0]['price']['product']
+        extra_tokens = PRODUCT_ID_TO_EXTRA_TOKENS.get(product_id, 0)
+
+        if tier_info:
+            with session_scope('verification') as db_session:
+                server = db_session.query(Server).filter_by(server_id=guild_id).first()
+                if server:
+                    server.tier = tier_info['tier']
+                    server.subscription_status = True
+                    server.verifications_count += tier_info['tokens']
+                    server.subscription_start_date = datetime.now(timezone.utc)
+                    server.stripe_subscription_id = session.get('subscription')
+                    server.role_id = session['metadata'].get('role_id')
+                    server.email = session['customer_details'].get('email')
+                else:
+                    server = Server(
+                        server_id=guild_id,
+                        owner_id=discord_id,
+                        tier=tier_info['tier'],
+                        subscription_status=True,
+                        verifications_count=tier_info['tokens'],
+                        subscription_start_date=datetime.now(timezone.utc),
+                        stripe_subscription_id=subscription_id,
+                        role_id=session['metadata'].get('role_id'),
+                        email=session['customer_details'].get('email')
+                    )
+                    db_session.add(server)
+                logging.info(f"Updated verification subscription for guild {guild_id}.")
+        
+        elif extra_tokens:
+            with session_scope('verification') as db_session:
+                if server:
+                    server.verifications_count += extra_tokens
+                else:
+                    logging.error(f"No server found for one-time purchase tokens. Server ID: {guild_id}")
+
     except Exception as e:
         logging.error(f"Error updating verification database: {e}")
 
