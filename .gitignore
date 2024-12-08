@@ -110,3 +110,9 @@ instance/
 
 # Local environment
 .env
+
+# My personal files
+encrypt.py
+*.xlsx
+tree.txt
+Instructions.txt

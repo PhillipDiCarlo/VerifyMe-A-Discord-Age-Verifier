@@ -1,3 +1,4 @@
+import hashlib
 import os
 import json
 import asyncio
@@ -10,9 +11,10 @@ from discord import app_commands
 from dotenv import load_dotenv
 import pika
 import stripe
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from cryptography.fernet import Fernet
 
 # Load environment variables
 load_dotenv()
@@ -29,7 +31,8 @@ logger = logging.getLogger(__name__)
 # Retrieve environment variables
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
-DATABASE_URL = os.getenv('DATABASE_URL')
+DATABASE_URL = os.getenv('DATABASE_URL_VERIFICATION')
+
 
 # RabbitMQ Configuration
 RABBITMQ_HOST = os.getenv('RABBITMQ_HOST')
@@ -40,7 +43,7 @@ RABBITMQ_VHOST = os.getenv('RABBITMQ_VHOST', '/')
 RABBITMQ_QUEUE_NAME = os.getenv('RABBITMQ_QUEUE_NAME', 'verification_results')
 
 # Ensure all required environment variables are set
-required_env_vars = ['DISCORD_BOT_TOKEN', 'STRIPE_SECRET_KEY', 'DATABASE_URL', 
+required_env_vars = ['DISCORD_BOT_TOKEN', 'STRIPE_SECRET_KEY', 'DATABASE_URL_VERIFICATION', 
                      'RABBITMQ_HOST', 'RABBITMQ_USERNAME', 'RABBITMQ_PASSWORD']
 missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 if missing_vars:
@@ -71,6 +74,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 
 # Subscription tier requirements
 tier_requirements = {
+    "tier_0": 0,
     "tier_1": 10,
     "tier_2": 25,
     "tier_3": 50,
@@ -82,14 +86,35 @@ tier_requirements = {
 # Cooldown period (seconds)
 COOLDOWN_PERIOD = 60  # 1 minute cooldown for demonstration purposes
 
-# Define SQLAlchemy models
+# Encryption/Decryption setup
+DOB_KEY = os.getenv('DOB_KEY')
+if not DOB_KEY:
+    raise ValueError("DOB_KEY not found in environment variables")
+
+cipher = Fernet(DOB_KEY)
+
+# Hashing function for the DOB
+def encrypt_dob(dob: datetime) -> str:
+    """Encrypt the date of birth using Fernet symmetric encryption."""
+    dob_str = dob.strftime('%Y-%m-%d')  # Convert DOB to string
+    dob_bytes = dob_str.encode('utf-8')  # Convert to bytes
+    encrypted_dob = cipher.encrypt(dob_bytes)  # Encrypt the DOB
+    return encrypted_dob.decode('utf-8')  # Return encrypted DOB as string
+
+def decrypt_dob(encrypted_dob: str) -> datetime:
+    """Decrypt the encrypted DOB back to a datetime object."""
+    dob_bytes = cipher.decrypt(encrypted_dob.encode('utf-8'))  # Decrypt the DOB
+    dob_str = dob_bytes.decode('utf-8')  # Convert bytes back to string
+    return datetime.strptime(dob_str, '%Y-%m-%d')  # Convert string to datetime object
+
+# Modify User model to store the encrypted DOB
 class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True)
     discord_id = Column(String(30), nullable=False)
     verification_status = Column(Boolean, default=False)
     last_verification_attempt = Column(DateTime(timezone=True))
-    dob = Column(DateTime(timezone=True), nullable=True)  # Add the dob attribute
+    dob = Column(String(255), nullable=True)  # Store encrypted DOB
 
     @staticmethod
     def get_current_time():
@@ -281,7 +306,10 @@ async def on_ready():
     logger.info(f'Bot is ready. Logged in as {bot.user}')
     bot.last_startup_time = datetime.now(timezone.utc)
     bot.loop.create_task(consume_queue())
-    # bot.loop.create_task(reset_verifications_count())
+    
+    # # Set the bot's bio/status
+    # bio_message = "Use `/get_verify_bot` to add this bot to your discord."
+    # await bot.change_presence(activity=discord.Game(name=bio_message))
 
     try:
         synced = await bot.tree.sync()
@@ -306,15 +334,34 @@ async def verify(interaction: discord.Interaction):
                 await send_error_response(interaction, server_config, guild_id)
                 return
 
+            # Check if the server is on tier_0
+            if server_config.tier == "tier_0":
+                if user and user.verification_status:
+                    # User is already verified, assign the role
+                    await assign_role(guild_id, interaction.user.id, server_config.role_id)
+                    await interaction.followup.send("You are already verified. Your role has been assigned.", ephemeral=True)
+                    return
+                else:
+                    # New users cannot verify in tier_0
+                    await interaction.followup.send("This tier does not support new user verification. Please contact the server owner or admin for assistance.", ephemeral=True)
+                    return
+
             # Check if the user is already verified
             if user and user.verification_status:
-                # Check if the user meets the minimum age requirement
+                # Decrypt the DOB to verify the age requirement
                 if user.dob:
-                    dob_datetime = datetime.combine(user.dob, datetime.min.time(), tzinfo=timezone.utc)
-                    user_age = (datetime.now(timezone.utc) - dob_datetime).days // 365
+                    decrypted_dob = decrypt_dob(user.dob)  # Decrypt the stored DOB
+                    
+                    # Make the decrypted_dob timezone-aware (UTC)
+                    decrypted_dob = decrypted_dob.replace(tzinfo=timezone.utc)
+                    
+                    # Calculate the user's age
+                    user_age = (datetime.now(timezone.utc) - decrypted_dob).days // 365
+                    
                     if user_age < server_config.minimum_age:
                         await interaction.followup.send(f"You must be at least {server_config.minimum_age} years old to be added to the role.", ephemeral=True)
                         return
+
                 # Assign role if age requirement is met
                 await assign_role(guild_id, interaction.user.id, server_config.role_id)
                 await interaction.followup.send("You are already verified. Your role has been assigned.", ephemeral=True)
@@ -411,17 +458,17 @@ def is_user_in_cooldown(last_verification_attempt):
 
 async def send_error_response(interaction, server_config, guild_id):
     if not server_config:
-        await interaction.followup.send("This server is not configured for verification. Please ask an admin to set up the server using `/set_role`.", ephemeral=True)
+        await interaction.followup.send("This server is not configured for verification. Please ask an admin to set up the server using `/setupverify`.", ephemeral=True)
     elif not server_config.role_id:
         logger.warning(f"No verification role set for guild {guild_id}")
-        await interaction.followup.send("The verification role has not been set for this server. Please ask an admin to set up the role using `/set_role`.", ephemeral=True)
+        await interaction.followup.send("The verification role has not been set for this server. Please ask an admin to set up the role using `/setupverify`.", ephemeral=True)
     elif not server_config.subscription_status:
         logger.warning(f"No active subscription for guild {guild_id}")
         await interaction.followup.send("This server does not have an active verification subscription.", ephemeral=True)
 
-@bot.tree.command(name="set_role", description="Set the role and minimum age for verified users")
+@bot.tree.command(name="setupverify", description="Set the role and minimum age for verified users")
 @app_commands.describe(role="The role to assign to verified users", minimum_age="The minimum age required for verification")
-async def set_role(interaction: discord.Interaction, role: discord.Role, minimum_age: int):
+async def setupVerify(interaction: discord.Interaction, role: discord.Role, minimum_age: int):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
@@ -445,6 +492,13 @@ async def set_role(interaction: discord.Interaction, role: discord.Role, minimum
 
     await interaction.response.send_message(f"Verification role set to: {role.name} with minimum age {minimum_age}", ephemeral=True)
 
+@bot.tree.command(name="get_verify_bot", description="Get the link to add this bot to your server")
+async def get_verify_bot(interaction: discord.Interaction):
+    message = (
+        "Click the link to add this bot to your server: "
+        "[Age Verification Solution](https://esattotech.com/age-verification-solution/)"
+    )
+    await interaction.response.send_message(message, ephemeral=True)
 
 @bot.tree.command(name="get_subscription", description="Get the subscription link for the server")
 async def get_subscription(interaction: discord.Interaction):
@@ -463,26 +517,28 @@ async def server_info(interaction: discord.Interaction):
         server_config = session.query(Server).filter_by(server_id=guild_id).first()
 
         if not server_config:
-            await interaction.response.send_message("This server is not configured for verification. Please type /set_role to configure.", ephemeral=True)
+            await interaction.response.send_message("This server is not configured for verification. Please type /setupverify to configure.", ephemeral=True)
             return
 
         verification_role = interaction.guild.get_role(int(server_config.role_id)) if server_config.role_id else None
+        tier = server_config.tier
+        max_verifications = tier_requirements.get(tier, "Tier not set")  # Provide a default value if tier is None
 
         embed = discord.Embed(title="Server Verification Configuration", color=discord.Color.blue())
         embed.add_field(name="Verification Role", value=verification_role.name if verification_role else "Not set", inline=False)
         embed.add_field(name="Server's Minimum Age", value=server_config.minimum_age, inline=False)
-        embed.add_field(name="Subscription Tier", value=server_config.tier, inline=True)
+        embed.add_field(name="Subscription Tier", value=tier if tier else "Not set", inline=True)
         embed.add_field(name="Subscription Status", value="Active" if server_config.subscription_status else "Inactive", inline=True)
         embed.add_field(name="Verifications Remaining", value=str(server_config.verifications_count), inline=True)
-        embed.add_field(name="Max Verifications/Month", value=str(tier_requirements[server_config.tier]), inline=True)
+        embed.add_field(name="Max Verifications/Month", value=str(max_verifications), inline=True)
 
         if server_config.verifications_count == 0:
             embed.add_field(name="Warning", value="You have reached the maximum number of verifications for this month.", inline=False)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="subscription_status", description="Show detailed information about the server's verification subscription")
-@app_commands.checks.has_permissions(administrator=True)
+# @bot.tree.command(name="subscription_status", description="Show detailed information about the server's verification subscription")
+# @app_commands.checks.has_permissions(administrator=True)
 async def subscription_status(interaction: discord.Interaction):
     guild_id = str(interaction.guild.id)
 
@@ -506,28 +562,28 @@ async def subscription_status(interaction: discord.Interaction):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="verification_logs", description="View recent verification actions")
-@app_commands.checks.has_permissions(administrator=True)
-async def verification_logs(interaction: discord.Interaction, limit: int = 10):
-    guild_id = str(interaction.guild.id)
+# @bot.tree.command(name="verification_logs", description="View recent verification actions")
+# @app_commands.checks.has_permissions(administrator=True)
+# async def verification_logs(interaction: discord.Interaction, limit: int = 10):
+#     guild_id = str(interaction.guild.id)
     
-    with session_scope() as session:
-        logs = session.query(CommandUsage).filter_by(server_id=guild_id).order_by(CommandUsage.timestamp.desc()).limit(limit).all()
+#     with session_scope() as session:
+#         logs = session.query(CommandUsage).filter_by(server_id=guild_id).order_by(CommandUsage.timestamp.desc()).limit(limit).all()
 
-    if not logs:
-        await interaction.response.send_message("No verification logs found for this server.", ephemeral=True)
-        return
+#     if not logs:
+#         await interaction.response.send_message("No verification logs found for this server.", ephemeral=True)
+#         return
 
-    embed = discord.Embed(title="Recent Verification Actions", color=discord.Color.blue())
+#     embed = discord.Embed(title="Recent Verification Actions", color=discord.Color.blue())
     
-    for log in logs:
-        user = interaction.guild.get_member(int(log.user_id))
-        user_name = user.name if user else f"Unknown User ({log.user_id})"
-        embed.add_field(name=f"{log.command} - {log.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
-                        value=f"User: {user_name}",
-                        inline=False)
+#     for log in logs:
+#         user = interaction.guild.get_member(int(log.user_id))
+#         user_name = user.name if user else f"Unknown User ({log.user_id})"
+#         embed.add_field(name=f"{log.command} - {log.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
+#                         value=f"User: {user_name}",
+#                         inline=False)
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+#     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="ping", description="Check if the bot is responsive")
 async def ping(interaction: discord.Interaction):

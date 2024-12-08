@@ -30,7 +30,7 @@ STRIPE_API_KEY = os.getenv('STRIPE_API_KEY')
 stripe.api_key = STRIPE_API_KEY
 
 # Database setup
-DATABASE_URL = os.getenv('DATABASE_URL')
+DATABASE_URL = os.getenv('DATABASE_URL_VERIFICATION')
 engine = create_engine(DATABASE_URL)
 Base = declarative_base()
 Session = sessionmaker(bind=engine)

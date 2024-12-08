@@ -1,3 +1,4 @@
+import hashlib
 import os
 import json
 import logging
@@ -10,8 +11,9 @@ import stripe
 from flask import Flask, request
 from dotenv import load_dotenv
 from pika.exceptions import AMQPError
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Date
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
+from cryptography.fernet import Fernet
 
 # Load environment variables
 load_dotenv()
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Database configuration
-DATABASE_URL = os.getenv('DATABASE_URL')
+DATABASE_URL = os.getenv('DATABASE_URL_VERIFICATION')
 engine = create_engine(DATABASE_URL)
 Base = declarative_base()
 Session = sessionmaker(bind=engine)
@@ -39,7 +41,7 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     discord_id = Column(String(50), nullable=False)
     verification_status = Column(Boolean, default=False)
-    dob = Column(Date, nullable=True)
+    dob = Column(String(255), nullable=True)  # Store the encrypted DOB
     last_verification_attempt = Column(DateTime(timezone=True), nullable=False, default=datetime.now)
 
 # Create tables
@@ -60,16 +62,6 @@ RABBITMQ_PASSWORD = os.getenv('RABBITMQ_PASSWORD')
 RABBITMQ_VHOST = os.getenv('RABBITMQ_VHOST')
 RABBITMQ_QUEUE_NAME = os.getenv('RABBITMQ_QUEUE_NAME')
 
-# Ensure all required environment variables are set
-required_env_vars = ['RABBITMQ_HOST', 'RABBITMQ_PORT', 'RABBITMQ_USERNAME', 'RABBITMQ_PASSWORD', 'RABBITMQ_VHOST', 'RABBITMQ_QUEUE_NAME']
-missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-if missing_vars:
-    raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
-
-# Convert RABBITMQ_PORT to integer after ensuring it is set
-RABBITMQ_PORT = int(RABBITMQ_PORT)
-
-# RabbitMQ connection parameters
 credentials = pika.PlainCredentials(RABBITMQ_USERNAME, RABBITMQ_PASSWORD)
 parameters = pika.ConnectionParameters(
     host=RABBITMQ_HOST,
@@ -89,6 +81,26 @@ def session_scope():
         raise
     finally:
         session.close()
+
+# Encryption/Decryption setup
+DOB_KEY = os.getenv('DOB_KEY')
+if not DOB_KEY:
+    raise ValueError("DOB_KEY not found in environment variables")
+
+cipher = Fernet(DOB_KEY)
+
+def encrypt_dob(dob: datetime) -> str:
+    """Encrypt the date of birth using Fernet symmetric encryption."""
+    dob_str = dob.strftime('%Y-%m-%d')  # Convert DOB to string
+    dob_bytes = dob_str.encode('utf-8')  # Convert to bytes
+    encrypted_dob = cipher.encrypt(dob_bytes)  # Encrypt the DOB
+    return encrypted_dob.decode('utf-8')  # Return encrypted DOB as string
+
+def decrypt_dob(encrypted_dob: str) -> datetime:
+    """Decrypt the encrypted DOB back to a datetime object."""
+    dob_bytes = cipher.decrypt(encrypted_dob.encode('utf-8'))  # Decrypt the DOB
+    dob_str = dob_bytes.decode('utf-8')  # Convert bytes back to string
+    return datetime.strptime(dob_str, '%Y-%m-%d')  # Convert string to datetime object
 
 def send_to_queue(message: Dict[str, Any], max_retries: int = 3) -> None:
     retries = 0
@@ -145,6 +157,7 @@ def stripe_webhook() -> tuple:
 
 def handle_verification_verified(session_id: str) -> None:
     try:
+        # Retrieve the verification session from Stripe, expanding to include DOB
         session = stripe.identity.VerificationSession.retrieve(
             session_id,
             expand=['verified_outputs.dob']
@@ -155,6 +168,7 @@ def handle_verification_verified(session_id: str) -> None:
         logger.error(f"Failed to retrieve verification session: {str(e)}")
         return
 
+    # Extract metadata from the session (guild_id, user_id, role_id)
     metadata = session.get('metadata', {})
     guild_id = metadata.get('guild_id')
     user_id = metadata.get('user_id')
@@ -164,30 +178,34 @@ def handle_verification_verified(session_id: str) -> None:
         logger.error(f"Missing user_id in metadata: {metadata}")
         return
 
+    # Extract and format the date of birth (DOB)
     dob = session.verified_outputs.get('dob', {})
     birthdate = f"{dob.get('year', '')}-{dob.get('month', ''):02d}-{dob.get('day', ''):02d}"
-    logger.info(f"Extracted birthdate: {birthdate}")
+
+    # Encrypt the DOB before storing it in the database
+    encrypted_dob = encrypt_dob(datetime.strptime(birthdate, "%Y-%m-%d"))
     verification_status = True
 
-    # Check if user exists and update, otherwise create a new user
+    # Check if the user already exists in the database, then update or create a new user
     with session_scope() as db_session:
         user = db_session.query(User).filter_by(discord_id=user_id).first()
         if user:
             user.verification_status = verification_status
-            user.dob = datetime.strptime(birthdate, "%Y-%m-%d").date()
+            user.dob = encrypted_dob  # Store the encrypted DOB
             user.last_verification_attempt = datetime.now()
-            logger.info(f"User {user_id} marked as verified with birthdate {birthdate}")
+            logger.info(f"User {user_id} marked as verified with encrypted DOB")
         else:
             # Add new user if not found
             new_user = User(
                 discord_id=user_id,
                 verification_status=verification_status,
-                dob=datetime.strptime(birthdate, "%Y-%m-%d").date(),
+                dob=encrypted_dob,  # Store the encrypted DOB
                 last_verification_attempt=datetime.now()
             )
             db_session.add(new_user)
-            logger.info(f"New user {user_id} added and marked as verified with birthdate {birthdate}")
+            logger.info(f"New user {user_id} added with encrypted DOB")
 
+    # Send the verification success message to the queue for role assignment in Discord
     message = {
         'type': 'verification_verified',
         'guild_id': guild_id,
@@ -200,7 +218,7 @@ def handle_verification_verified(session_id: str) -> None:
 def handle_verification_canceled(session: Dict[str, Any]) -> None:
     metadata = session.get('metadata', {})
     guild_id = metadata.get('guild_id')
-    user_id = metadata.get('user_id')  # This is used as discord_id
+    user_id = metadata.get('user_id')
     role_id = metadata.get('role_id')
 
     if not user_id:

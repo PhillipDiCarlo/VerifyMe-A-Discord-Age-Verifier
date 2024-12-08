@@ -1,5 +1,4 @@
 import os
-import json
 import stripe
 import threading
 from flask import Flask, request, jsonify
@@ -20,14 +19,21 @@ app = Flask(__name__)
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 endpoint_secret = os.getenv('STRIPE_PAYMENT_WEBHOOK_SECRET')
 
-# Database setup
-DATABASE_URL = os.getenv('DATABASE_URL')
-engine = create_engine(DATABASE_URL)
-Base = declarative_base()
-Session = sessionmaker(bind=engine)
+# Database setup for both services
+DATABASE_URL_VERIFICATION = os.getenv('DATABASE_URL_VERIFICATION')
+DATABASE_URL_DJ = os.getenv('DATABASE_URL_DJ')
 
-# Define SQLAlchemy models
-class Server(Base):
+engine_verification = create_engine(DATABASE_URL_VERIFICATION)
+engine_dj = create_engine(DATABASE_URL_DJ)
+
+BaseVerification = declarative_base()
+BaseDJ = declarative_base()
+
+SessionVerification = sessionmaker(bind=engine_verification)
+SessionDJ = sessionmaker(bind=engine_dj)
+
+# Define SQLAlchemy models for Verification Service
+class Server(BaseVerification):
     __tablename__ = 'servers'
     id = Column(Integer, primary_key=True)
     server_id = Column(String(30), nullable=False, unique=True)
@@ -37,23 +43,37 @@ class Server(Base):
     verifications_count = Column(Integer, default=0)
     subscription_start_date = Column(DateTime(timezone=True), nullable=True)
     stripe_subscription_id = Column(String(255), nullable=True)
-    role_id = Column(String(30), nullable=True)  # Updated to allow NULL
-    email = Column(String(255), nullable=True)  # New column for storing customer email
+    role_id = Column(String(30), nullable=True)
+    email = Column(String(255), nullable=True)
 
-Base.metadata.create_all(engine)
+# Define SQLAlchemy models for DJ Service
+class User(BaseDJ):
+    __tablename__ = 'users'
+    stripe_subscription_id = Column(String(255), primary_key=True)  # Set as primary key
+    discord_id = Column(String(50), nullable=True)
+    active_subscription = Column(Boolean, default=False)
+    email = Column(String(255), nullable=True)
+    subscription_start_date = Column(DateTime(timezone=True), nullable=True)
+
+# Create tables
+BaseVerification.metadata.create_all(engine_verification)
+BaseDJ.metadata.create_all(engine_dj)
 
 @contextmanager
-def session_scope():
+def session_scope(service_type):
+    Session = SessionVerification if service_type == 'verification' else SessionDJ
     session = Session()
     try:
         yield session
         session.commit()
+        logging.info("Transaction committed.")
     except Exception as e:
         session.rollback()
         logging.error(f"Error during session scope: {e}")
         raise
     finally:
         session.close()
+
 
 # Logging setup
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
@@ -63,14 +83,16 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# Mapping of product IDs to tiers and their corresponding verification tokens
+# Product IDs for Routing
+PRODUCT_ID_DJ = 'prod_R2mETUJ7RTWF4t'
 PRODUCT_ID_TO_TIER = {
-    'prod_QXNi63ixsJYIke': {'tier': 'tier_1', 'tokens': 10},
-    'prod_QXNldB600Dr8RX': {'tier': 'tier_2', 'tokens': 25},
-    'prod_QXNnv5WYeieAGZ': {'tier': 'tier_3', 'tokens': 50},
-    'prod_QXNpnlGsJn210K': {'tier': 'tier_4', 'tokens': 75},
-    'prod_QXNrATAgXjN7Xi': {'tier': 'tier_5', 'tokens': 100},
-    'prod_QXNtfHzYQ2EhUx': {'tier': 'tier_6', 'tokens': 150},
+    'prod_QrCgveExowX4SZ': {'tier': 'tier_0', 'tokens': 0},
+    'prod_QtuUxwu41WzrPw': {'tier': 'tier_1', 'tokens': 10},
+    'prod_QtuVxykbkplAZw': {'tier': 'tier_2', 'tokens': 25},
+    'prod_QtuWzcaMquctfT': {'tier': 'tier_3', 'tokens': 50},
+    'prod_QtuXjrcE0cIlLG': {'tier': 'tier_4', 'tokens': 75},
+    'prod_QtuYXFfzpKS29k': {'tier': 'tier_5', 'tokens': 100},
+    'prod_QtuYlkTvZ0181h': {'tier': 'tier_6', 'tokens': 150},
 }
 
 # Mapping of product IDs to one-time purchase token amounts
@@ -112,162 +134,167 @@ def stripe_webhook():
 
 def process_event(event):
     try:
-        if event['type'] == 'checkout.session.completed':
+        event_type = event['type']
+        if event_type == 'checkout.session.completed':
             session = event['data']['object']
-            handle_checkout_session(session)
-        elif event['type'] in ['invoice.payment_failed', 'customer.subscription.updated', 'invoice.payment_succeeded']:
-            handle_subscription_status(event)
-        elif event['type'].startswith('subscription_schedule'):
-            handle_subscription_schedule(event)
-    except Exception as e:
-        logging.error(f"Error handling webhook event: {e}")
+            product_id = None  # product_id is not in session, handled in each function
 
-def handle_checkout_session(session):
+            # Use the existing logic for DJ and Verification services here
+            subscription_id = session.get('subscription')
+            if subscription_id:
+                subscription = stripe.Subscription.retrieve(subscription_id)
+                product_id = subscription['items']['data'][0]['price']['product']
+
+            if product_id == PRODUCT_ID_DJ:
+                handle_dj_checkout_session(session)
+            elif product_id in PRODUCT_ID_TO_TIER:
+                handle_verification_checkout_session(session)
+
+        elif event_type == 'customer.subscription.updated':
+            subscription = event['data']['object']
+            product_id = subscription['items']['data'][0]['price']['product']
+            subscription_id = subscription['id']
+            status = subscription['status']
+            metadata = subscription.get('metadata', {})
+            
+            if product_id == PRODUCT_ID_DJ:
+                handle_dj_subscription_update(subscription_id, status, metadata)
+            elif product_id in PRODUCT_ID_TO_TIER:
+                handle_verification_subscription_update(subscription_id, status, metadata)
+
+    except Exception as e:
+        logging.error(f"Error processing event: {e}")
+
+
+def handle_verification_checkout_session(session):
     logging.info("Handling checkout.session.completed event")
     customer_email = session['customer_details'].get('email')
     custom_fields = session.get('custom_fields', [])
-    
-    # Extract custom fields
-    user_id = next((field['text']['value'] for field in custom_fields if field['key'] == 'discorduseridnotyourusername'), None)
-    guild_id = next((field['text']['value'] for field in custom_fields if field['key'] in ['discordserverid', 'discordserveridnotservername']), None)
+
+    guild_id = next((field['text']['value'] for field in custom_fields if field['key'] in ['discordserverid', 'discordserveridnotyourservername', 'discordserveridnotservername']), None)
+    discord_id = next((field['text']['value'] for field in custom_fields if field['key'] == 'discorduseridnotyourusername'), None)
     subscription_id = session.get('subscription')
 
-    # Fetch the session's line items
+    line_items = stripe.checkout.Session.list_line_items(session['id'])
+    product_id = line_items['data'][0]['price']['product']
+    tier_info = PRODUCT_ID_TO_TIER.get(product_id)
+
+    if not guild_id or not discord_id or not tier_info:
+        logging.error("Missing guild_id, discord_id, or tier info.")
+        return
+
     try:
-        line_items = stripe.checkout.Session.list_line_items(session['id'])
-        product_id = line_items['data'][0]['price']['product']
-        tier_info = PRODUCT_ID_TO_TIER.get(product_id)
+        # line_items = stripe.checkout.Session.list_line_items(session['id'])
+        # product_id = line_items['data'][0]['price']['product']
         extra_tokens = PRODUCT_ID_TO_EXTRA_TOKENS.get(product_id, 0)
-    except Exception as e:
-        logging.error(f"Error fetching line items: {e}")
-        return
 
-    if not all([user_id, guild_id]):
-        logging.error("Missing necessary metadata")
-        return
-
-    try:
-        with session_scope() as db_session:
-            server = db_session.query(Server).filter_by(server_id=guild_id).first()
-            if not server:
-                server = db_session.query(Server).filter_by(stripe_subscription_id=subscription_id).first()
-            
-            if tier_info:
-                tier = tier_info['tier']
-                tokens = tier_info['tokens']
+        if tier_info:
+            with session_scope('verification') as db_session:
+                server = db_session.query(Server).filter_by(server_id=guild_id).first()
                 if server:
-                    old_tokens = PRODUCT_ID_TO_TIER.get(server.tier, {}).get('tokens', 0)
-                    server.owner_id = user_id
-                    server.tier = tier
+                    server.tier = tier_info['tier']
                     server.subscription_status = True
+                    server.verifications_count += tier_info['tokens']
                     server.subscription_start_date = datetime.now(timezone.utc)
-                    server.stripe_subscription_id = subscription_id
-                    server.email = customer_email
-
-                    # Reset the verification count if it's a new subscription or upgrade
-                    if tokens >= old_tokens:
-                        server.verifications_count = tokens - (old_tokens - server.verifications_count)
-                    else:
-                        server.verifications_count = tokens
+                    server.stripe_subscription_id = session.get('subscription')
+                    server.role_id = session['metadata'].get('role_id')
+                    server.email = session['customer_details'].get('email')
                 else:
                     server = Server(
                         server_id=guild_id,
-                        owner_id=user_id,
-                        tier=tier,
+                        owner_id=discord_id,
+                        tier=tier_info['tier'],
                         subscription_status=True,
-                        verifications_count=tokens,
+                        verifications_count=tier_info['tokens'],
                         subscription_start_date=datetime.now(timezone.utc),
                         stripe_subscription_id=subscription_id,
-                        email=customer_email
+                        role_id=session['metadata'].get('role_id'),
+                        email=session['customer_details'].get('email')
                     )
                     db_session.add(server)
-            elif extra_tokens:
+                logging.info(f"Updated verification subscription for guild {guild_id}.")
+        
+        elif extra_tokens:
+            with session_scope('verification') as db_session:
                 if server:
                     server.verifications_count += extra_tokens
                 else:
                     logging.error(f"No server found for one-time purchase tokens. Server ID: {guild_id}")
 
-            logging.info(f"Updated server {guild_id} with new subscription data or added extra tokens")
     except Exception as e:
-        logging.error(f"Error updating database for checkout session: {e}")
+        logging.error(f"Error updating verification database: {e}")
 
-def handle_subscription_schedule(event):
-    logging.info(f"Handling {event['type']} event")
-    schedule = event['data']['object']
-    subscription_id = schedule.get('subscription')
-    status = schedule.get('status')
+def handle_dj_checkout_session(session):
+    logging.info("Handling DJ checkout session...")
+    customer_email = session['customer_details'].get('email')
+    discord_id = next((field['text']['value'] for field in session.get('custom_fields', []) if field['key'] == 'discorduseridnotyourusername'), None)
+    subscription_id = session.get('subscription')  # Retrieve the subscription ID
 
-    if not subscription_id:
-        logging.error("Missing subscription ID in schedule event")
+    try:
+        with session_scope('dj') as db_session:
+            user = db_session.query(User).filter_by(stripe_subscription_id=subscription_id).first()
+            if user:
+                # Finalize setup with all available details
+                user.discord_id = discord_id
+                user.email = customer_email
+                user.subscription_start_date = datetime.now(timezone.utc)
+                logging.info(f"Finalized setup for user {discord_id} with subscription ID {subscription_id}.")
+            else:
+                # Handle the rare case where no user row exists; create a new row as a backup
+                new_user = User(
+                    discord_id=discord_id,
+                    stripe_subscription_id=subscription_id,
+                    email=customer_email,
+                    active_subscription=True,
+                    subscription_start_date=datetime.now(timezone.utc)
+                )
+                db_session.add(new_user)
+                logging.info(f"Added new user on completed session for subscription ID {subscription_id}")
+    except Exception as e:
+        logging.error(f"Error updating DJ database during checkout session: {e}")
+
+def handle_dj_subscription_update(subscription_id, status, metadata):
+    discord_id = metadata.get('discorduseridnotyourusername')
+    logging.info(f"Updating DJ subscription {subscription_id} for user {discord_id} with status {status}")
+
+    try:
+        with session_scope('dj') as db_session:
+            user = db_session.query(User).filter_by(stripe_subscription_id=subscription_id).first()
+            if user:
+                # Update status and ensure it reflects the correct active state
+                user.active_subscription = (status == 'active')
+                if discord_id:
+                    user.discord_id = discord_id
+                logging.info(f"Updated existing user for subscription ID {subscription_id}")
+            else:
+                # Create a new user with limited details
+                new_user = User(
+                    discord_id=discord_id if discord_id else None,
+                    stripe_subscription_id=subscription_id,
+                    active_subscription=(status == 'active')
+                )
+                db_session.add(new_user)
+                logging.info(f"Created new user for subscription ID {subscription_id}")
+    except Exception as e:
+        logging.error(f"Error updating DJ database for subscription update: {e}")
+
+def handle_verification_subscription_update(subscription_id, status, metadata):
+    guild_id = metadata.get('guild_id')
+    logging.info(f"Updating verification subscription {subscription_id} for guild {guild_id} with status {status}")
+
+    if not guild_id:
+        logging.error("Guild ID not found in metadata.")
         return
 
     try:
-        with session_scope() as db_session:
-            server = db_session.query(Server).filter_by(stripe_subscription_id=subscription_id).first()
-            if not server:
-                logging.error(f"No server found with subscription ID {subscription_id}")
-                return
-
-            if event['type'] == 'subscription_schedule.canceled':
-                server.subscription_status = False
-            elif event['type'] == 'subscription_schedule.completed':
-                server.subscription_status = True
-                if server.subscription_start_date and datetime.now(timezone.utc) - server.subscription_start_date >= timedelta(days=30):
-                    tokens = PRODUCT_ID_TO_TIER.get(server.tier, {}).get('tokens', 0)
-                    server.verifications_count = tokens
-                    server.subscription_start_date = datetime.now(timezone.utc)
-
-            logging.info(f"Updated server {server.server_id} subscription status to {server.subscription_status}")
+        with session_scope('verification') as db_session:
+            server = db_session.query(Server).filter_by(server_id=guild_id).first()
+            if server:
+                server.subscription_status = (status == 'active')
+                server.stripe_subscription_id = subscription_id
+                logging.info(f"Updated verification guild {guild_id} with active status: {server.subscription_status}")
     except Exception as e:
-        logging.error(f"Error updating database for subscription schedule: {e}")
-
-def handle_subscription_status(event):
-    logging.info("Handling subscription status event")
-    subscription = event['data']['object']
-    subscription_id = subscription.get('id')
-    status = subscription.get('status')
-    items = subscription.get('items', {}).get('data', [])
-    
-    # Extract product_id from subscription items
-    product_id = items[0]['plan']['product'] if items else None
-    tier_info = PRODUCT_ID_TO_TIER.get(product_id)
-
-    if not subscription_id:
-        logging.error("Missing subscription ID in status event")
-        return
-
-    try:
-        with session_scope() as db_session:
-            server = db_session.query(Server).filter((Server.server_id == subscription['metadata'].get('discordserverid')) | 
-                                                     (Server.stripe_subscription_id == subscription_id)).first()
-            if not server:
-                logging.error(f"No server found with subscription ID {subscription_id}")
-                return
-
-            if status in ['canceled', 'unpaid', 'incomplete', 'incomplete_expired', 'past_due']:
-                server.subscription_status = False
-            elif status == 'active':
-                server.subscription_status = True
-
-                # Reset or update verification tokens based on the event type
-                if event['type'] == 'customer.subscription.updated':
-                    if tier_info:
-                        old_tokens = PRODUCT_ID_TO_TIER.get(server.tier, {}).get('tokens', 0)
-                        server.tier = tier_info['tier']
-                        tokens = tier_info['tokens']
-                        if tokens >= old_tokens:
-                            server.verifications_count = tokens - (old_tokens - server.verifications_count)
-                        else:
-                            server.verifications_count = tokens
-                elif event['type'] == 'invoice.payment_succeeded':
-                    if tier_info:
-                        tokens = tier_info['tokens']
-                        server.verifications_count = tokens  # Reset the verifications count
-                        server.subscription_start_date = datetime.now(timezone.utc)  # Update subscription start date
-
-            logging.info(f"Updated server {server.server_id} subscription status to {server.subscription_status}")
-    except Exception as e:
-        logging.error(f"Error updating database for subscription status: {e}")
+        logging.error(f"Error updating verification database for subscription update: {e}")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5433)
