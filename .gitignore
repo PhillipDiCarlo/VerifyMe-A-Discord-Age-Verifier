@@ -113,5 +113,5 @@ instance/
 
 # My personal files
 encrypt.py
-.xlsx
+*.xlsx
 tree.txt
