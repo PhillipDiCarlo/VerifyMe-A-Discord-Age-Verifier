@@ -163,8 +163,7 @@ if __name__ == '__main__':
     logging.info("Subscription checker started. Press Ctrl+C to exit.")
 
     try:
-        while True:
-            pass
+        scheduler._event.wait()
     except (KeyboardInterrupt, SystemExit):
         scheduler.shutdown()
         logging.info("Subscription checker stopped.")
