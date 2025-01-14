@@ -92,8 +92,8 @@ logging.basicConfig(
 PRODUCT_ID_DJ = 'prod_R2mETUJ7RTWF4t'
 PRODUCT_ID_TO_TIER = {
     'prod_QrCgveExowX4SZ': {'tier': 'tier_0', 'tokens': 0},
-    'prod_QtuUxwu41WzrPw': {'tier': 'tier_1', 'tokens': 10},
-    'prod_QtuVxykbkplAZw': {'tier': 'tier_2', 'tokens': 25},
+    'prod_Ra9LidflO2dgt0': {'tier': 'tier_1', 'tokens': 10},
+    'prod_Ra9LxBfXnAUz8o': {'tier': 'tier_2', 'tokens': 25},
     'prod_QtuWzcaMquctfT': {'tier': 'tier_3', 'tokens': 50},
     'prod_QtuXjrcE0cIlLG': {'tier': 'tier_4', 'tokens': 75},
     'prod_QtuYXFfzpKS29k': {'tier': 'tier_5', 'tokens': 100},
