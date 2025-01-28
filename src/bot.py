@@ -264,6 +264,9 @@ async def process_verification_result(message):
         guild_id = data['guild_id']
         user_id = data['user_id']
         role_id = data['role_id']
+        logger.debug(f"Decrementing verification count for guild {guild_id} after successful verification.")
+        await decrement_verifications_count(guild_id)
+        logger.info(f"Verification count decremented for guild {guild_id}.")
         await assign_role(guild_id, user_id, role_id)
         await update_user_verification_status(user_id, True)
     elif data['type'] == 'verification_canceled':
