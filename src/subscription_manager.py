@@ -22,15 +22,19 @@ endpoint_secret = os.getenv('STRIPE_PAYMENT_WEBHOOK_SECRET')
 # Database setup for both services
 DATABASE_URL_VERIFICATION = os.getenv('DATABASE_URL_VERIFICATION')
 DATABASE_URL_DJ = os.getenv('DATABASE_URL_DJ')
+DATABASE_URL_VRCVERIFY = os.getenv('DATABASE_URL_VRCVERIFY')
 
 engine_verification = create_engine(DATABASE_URL_VERIFICATION)
 engine_dj = create_engine(DATABASE_URL_DJ)
+engine_vrcverify = create_engine(DATABASE_URL_VRCVERIFY)
 
 BaseVerification = declarative_base()
 BaseDJ = declarative_base()
+BaseVRCVerification= declarative_base()
 
 SessionVerification = sessionmaker(bind=engine_verification)
 SessionDJ = sessionmaker(bind=engine_dj)
+SessionVRCVerify = sessionmaker(bind=engine_vrcverify)
 
 # ------------------------
 #  VERIFICATION SERVICE
@@ -61,13 +65,38 @@ class User(BaseDJ):
     subscription_start_date = Column(DateTime(timezone=True), nullable=True)
     last_renewal_date = Column(DateTime(timezone=True), nullable=True)
 
+# ------------------------
+#  VRCVerify SERVICE
+# ------------------------
+class User(BaseVRCVerification):
+    __tablename__ = 'servers'
+    id = Column(Integer, primary_key=True)
+    server_id = Column(String(30), nullable=False, unique=True)
+    owner_id = Column(String(30), nullable=False)
+    subscription_status = Column(Boolean, default=False)
+    subscription_start_date = Column(DateTime(timezone=True), nullable=True)
+    stripe_subscription_id = Column(String(255), nullable=True)
+    role_id = Column(String(30), nullable=True)
+    email = Column(String(255), nullable=True)
+    last_renewal_date = Column(DateTime(timezone=True), nullable=True)
+
+
 # Create tables (or run migrations in production!)
 BaseVerification.metadata.create_all(engine_verification)
 BaseDJ.metadata.create_all(engine_dj)
+BaseVRCVerification.metadata.create_all(engine_vrcverify)
 
 @contextmanager
 def session_scope(service_type):
-    Session = SessionVerification if service_type == 'verification' else SessionDJ
+    if service_type == 'verification':
+        Session = SessionVerification
+    elif service_type == 'dj':
+        Session = SessionDJ
+    elif service_type == 'vrcverify':
+        Session = SessionVRCVerify
+    else:
+        raise ValueError(f"Unknown service_type: {service_type}")
+
     session = Session()
     try:
         yield session
@@ -99,6 +128,7 @@ PRODUCT_ID_TO_TIER = {
     'prod_QtuYXFfzpKS29k': {'tier': 'tier_5', 'tokens': 100},
     'prod_QtuYlkTvZ0181h': {'tier': 'tier_6', 'tokens': 150},
 }
+PRODUCT_ID_VRCVERIFY = 'prod_RiPixlb0Wh2z7s'
 
 # Mapping of product IDs to one-time purchase token amounts
 PRODUCT_ID_TO_EXTRA_TOKENS = {
@@ -148,21 +178,22 @@ def process_event(event):
         if event_type == 'checkout.session.completed':
             session_obj = event['data']['object']
             subscription_id = session_obj.get('subscription')
-
-            product_id = None
             if subscription_id:
                 subscription = stripe.Subscription.retrieve(subscription_id)
                 product_id = subscription['items']['data'][0]['price']['product']
 
-            # DJ Bot
-            if product_id == PRODUCT_ID_DJ:
-                handle_dj_checkout_session(session_obj)
+                # DJ Bot
+                if product_id == PRODUCT_ID_DJ:
+                    handle_dj_checkout_session(session_obj)
 
-            # Verification Service
-            elif product_id in PRODUCT_ID_TO_TIER:
-                handle_verification_checkout_session(session_obj)
+                # VerifyMe Service
+                elif product_id in PRODUCT_ID_TO_TIER:
+                    handle_verification_checkout_session(session_obj)
+                    
+                # VRCVerify Bot
+                elif product_id in PRODUCT_ID_VRCVERIFY:
+                    handle_vrcverify_checkout_session(session_obj)
 
-        # 2) Subscription Created
         elif event_type == 'customer.subscription.created':
             subscription = event['data']['object']
             product_id = subscription['items']['data'][0]['price']['product']
@@ -170,12 +201,11 @@ def process_event(event):
             status = subscription['status']
             metadata = subscription.get('metadata', {})
             current_period_start = subscription.get('current_period_start')
-
+            
             # Convert Unix timestamp to datetime
+            current_period_start_dt = None
             if current_period_start:
                 current_period_start_dt = datetime.utcfromtimestamp(current_period_start).replace(tzinfo=timezone.utc)
-            else:
-                current_period_start_dt = None
 
             # DJ
             if product_id == PRODUCT_ID_DJ:
@@ -183,8 +213,10 @@ def process_event(event):
             # Verification
             elif product_id in PRODUCT_ID_TO_TIER:
                 handle_verification_subscription_created(subscription_id, status, metadata, current_period_start_dt)
+            # VRCVerify
+            elif product_id in PRODUCT_ID_VRCVERIFY:
+                handle_vrcverify_subscription_created(subscription_id, status, metadata, current_period_start_dt)
 
-        # 3) Subscription Updated
         elif event_type == 'customer.subscription.updated':
             subscription = event['data']['object']
             product_id = subscription['items']['data'][0]['price']['product']
@@ -192,19 +224,18 @@ def process_event(event):
             status = subscription['status']
             metadata = subscription.get('metadata', {})
             current_period_start = subscription.get('current_period_start')
-
             # Convert Unix timestamp to datetime
+            current_period_start_dt = None
             if current_period_start:
                 current_period_start_dt = datetime.utcfromtimestamp(current_period_start).replace(tzinfo=timezone.utc)
-            else:
-                current_period_start_dt = None
 
             if product_id == PRODUCT_ID_DJ:
                 handle_dj_subscription_update(subscription_id, status, metadata, current_period_start_dt)
             elif product_id in PRODUCT_ID_TO_TIER:
                 handle_verification_subscription_update(subscription_id, status, metadata, current_period_start_dt)
+            elif product_id in PRODUCT_ID_VRCVERIFY:
+                handle_vrcverify_subscription_update(subscription_id, status, metadata, current_period_start_dt)
 
-        # 4) Subscription Deleted
         elif event_type == 'customer.subscription.deleted':
             subscription = event['data']['object']
             product_id = subscription['items']['data'][0]['price']['product']
@@ -215,7 +246,9 @@ def process_event(event):
                 handle_dj_subscription_deleted(subscription_id, metadata)
             elif product_id in PRODUCT_ID_TO_TIER:
                 handle_verification_subscription_deleted(subscription_id, metadata)
-
+            elif product_id in PRODUCT_ID_VRCVERIFY:
+                handle_vrcverify_subscription_deleted(subscription_id, metadata)
+    
     except Exception as e:
         logging.error(f"Error processing event: {e}")
 
@@ -532,6 +565,157 @@ def handle_dj_subscription_deleted(subscription_id, metadata):
     except Exception as e:
         logging.error(f"Error handling DJ subscription deletion: {e}")
 
+# -------------------------------------------------------
+#       HANDLERS FOR VRCVerify SERVICE (USER MODEL)
+# -------------------------------------------------------
+
+def handle_vrcverify_checkout_session(session):
+    """
+    Called when checkout.session.completed for a VRCVerify subscription.
+    """
+    logging.info("Handling checkout.session.completed for VRCVerify")
+    custom_fields = session.get('custom_fields', [])
+    customer_email = session['customer_details'].get('email')
+
+    # Parse custom_fields for 'guild_id'
+    guild_id = next(
+        (
+            field['text']['value']
+            for field in custom_fields
+            if field['key'] in ['discordserverid', 'discordserveridnotyourservername', 'discordserveridnotservername']
+        ),
+        None
+    )
+    discord_id = next(
+        (
+            field['text']['value']
+            for field in custom_fields
+            if field['key'] == 'discorduseridnotyourusername'
+        ),
+        None
+    )
+
+    subscription_id = session.get('subscription')
+
+    if not guild_id or not discord_id:
+        logging.error("Missing guild_id, discord_id.")
+        return
+
+    try:
+        with session_scope("vrcverify") as db_session:
+            # 'servers' table is mapped by your class User
+            server = db_session.query(User).filter_by(server_id=guild_id).first()
+            if server:
+                server.subscription_status = True
+                server.subscription_start_date = datetime.now(timezone.utc)
+                server.stripe_subscription_id = subscription_id
+                server.role_id = session['metadata'].get('role_id') # Maybe not needed
+                server.email = customer_email
+                server.last_renewal_date = datetime.now(timezone.utc)
+
+            else:
+                new_server = User(
+                    server_id=guild_id,
+                    owner_id=discord_id,
+                    subscription_status=True,
+                    subscription_start_date=datetime.now(timezone.utc),
+                    stripe_subscription_id=subscription_id,
+                    role_id=session['metadata'].get('role_id'), # Maybe not needed
+                    email=customer_email,
+                    last_renewal_date=datetime.now(timezone.utc)
+                )
+                db_session.add(new_server)
+
+        logging.info(f"[VRCVerify] Subscription checkout completed for guild {guild_id}, subscription {subscription_id}.")
+    except Exception as e:
+        logging.error(f"Error in handle_vrcverify_checkout_session: {e}")
+
+def handle_vrcverify_subscription_created(subscription_id, status, metadata, current_period_start_dt):
+    logging.info(f"[VRCVerify] Subscription created: {subscription_id}, status={status}")
+
+    guild_id = metadata.get('guild_id')  # Check for correct key
+    if not guild_id:
+        logging.warning(f"[VRCVerify] No guild_id in metadata for subscription {subscription_id}. Cannot process.")
+        return
+
+    # Retrieve product ID
+    try:
+        subscription = stripe.Subscription.retrieve(subscription_id)
+        product_id = subscription['items']['data'][0]['price']['product']
+    except Exception as e:
+        logging.error(f"Unable to retrieve subscription {subscription_id}: {e}")
+        return
+
+    try:
+        with session_scope("vrcverify") as db_session:
+            server = db_session.query(User).filter_by(server_id=guild_id).first()
+            if server:
+                server.subscription_status = True
+                if current_period_start_dt:
+                    server.last_renewal_date = current_period_start_dt
+                if not server.subscription_start_date:
+                    server.subscription_start_date = current_period_start_dt or datetime.now(timezone.utc)
+                server.stripe_subscription_id = subscription_id
+            else:
+                new_server = User(
+                    server_id=guild_id,
+                    owner_id=metadata.get('discorduseridnotyourusername', 'UNKNOWN'),
+                    subscription_status=True,
+                    subscription_start_date=current_period_start_dt or datetime.now(timezone.utc),
+                    stripe_subscription_id=subscription_id,
+                    email=metadata.get('email'),
+                    last_renewal_date=current_period_start_dt or datetime.now(timezone.utc)
+                )
+                db_session.add(new_server)
+
+        logging.info(f"[VRCVerify] Subscription created successfully for guild {guild_id}.")
+    except Exception as e:
+        logging.error(f"Error processing VRCVerify subscription creation: {e}")
+
+def handle_vrcverify_subscription_update(subscription_id, status, metadata, current_period_start_dt):
+    logging.info(f"[VRCVerify] Updating subscription {subscription_id} with status {status}")
+
+    guild_id = metadata.get('guild_id')
+    if not guild_id:
+        logging.error(f"[VRCVerify] No guild_id found in subscription metadata for update. Subscription {subscription_id} cannot be processed.")
+        return
+
+    try:
+        subscription = stripe.Subscription.retrieve(subscription_id)
+        product_id = subscription['items']['data'][0]['price']['product']
+
+        with session_scope('vrcverify') as db_session:
+            server = db_session.query(User).filter_by(server_id=guild_id).first()
+            if server:
+                server.subscription_status = (status == 'active')
+                # Update last_renewal_date if we have a new current_period_start
+                if current_period_start_dt:
+                    server.last_renewal_date = current_period_start_dt
+
+                # Keep subscription_start_date for analytics, no immediate changes
+                server.stripe_subscription_id = subscription_id
+
+                logging.info(f"Updated [VRCVerify] guild {guild_id}, active: {server.subscription_status}, tier: {server.tier}")
+
+        logging.info(f"[VRCVerify] Subscription update successful for guild {guild_id}.")
+    except Exception as e:
+        logging.error(f"Error updating VRCVerify subscription: {e}")
+
+def handle_vrcverify_subscription_deleted(subscription_id, metadata):
+    logging.info(f"[VRCVerify] Subscription deleted: {subscription_id}")
+
+    try:
+        with session_scope('vrcverify') as db_session:
+            server = db_session.query(Server).filter_by(stripe_subscription_id=subscription_id).first()
+            if server:
+                server.subscription_status = False
+                # We do NOT reset last_renewal_date, we keep it for historical reference
+                logging.info(f"[VRCVerify] subscription marked inactive for subscription_id={subscription_id}.")
+            else:
+                # If no server is found, log a warning or error
+                logging.warning(f"No server found matching stripe_subscription_id={subscription_id}.")
+    except Exception as e:
+        logging.error(f"Error handling [VRCVerify] subscription deletion: {e}")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5433)
