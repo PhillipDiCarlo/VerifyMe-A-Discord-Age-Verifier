@@ -11,7 +11,7 @@ from discord import app_commands
 from dotenv import load_dotenv
 import pika
 import stripe
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, text, inspect
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from cryptography.fernet import Fernet
@@ -27,6 +27,10 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# Reduce noise from pika unless explicitly overridden
+PIKA_LOG_LEVEL = os.getenv('PIKA_LOG_LEVEL', 'WARNING').upper()
+logging.getLogger('pika').setLevel(getattr(logging, PIKA_LOG_LEVEL, logging.WARNING))
 
 # Retrieve environment variables
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
@@ -54,13 +58,13 @@ engine = create_engine(DATABASE_URL)
 Base = declarative_base()
 Session = sessionmaker(bind=engine)
 
-# Initialize the Discord bot with intents
+# Initialize the Discord bot with intents (avoid heavy member chunking at startup)
 intents = discord.Intents.default()
-intents.members = True  # Enable the members intent
 
 class MyBot(discord.Client):
     def __init__(self):
-        super().__init__(intents=intents)
+        # Disable guild member chunking at startup to speed up readiness
+        super().__init__(intents=intents, chunk_guilds_at_startup=False)
         self.tree = app_commands.CommandTree(self)
         self.last_startup_time = None
 
@@ -135,6 +139,8 @@ class Server(Base):
     subscription_start_date = Column(DateTime, nullable=True)
     stripe_subscription_id = Column(String, nullable=True)
     minimum_age = Column(Integer, nullable=False, default=18)
+    instructions_channel_id = Column(String, nullable=True)
+    instructions_message_id = Column(String, nullable=True)
 
 
 class CommandUsage(Base):
@@ -208,8 +214,16 @@ async def assign_role(guild_id, user_id, role_id):
     logger.debug(f"Attempting to find member {user_id} in guild {guild_id}")
     member = guild.get_member(int(user_id))
     if not member:
-        logger.error(f"Member {user_id} not found in guild {guild_id}")
-        return
+        # Fallback to REST fetch to avoid requiring Members intent/cache
+        try:
+            member = await guild.fetch_member(int(user_id))
+            logger.debug(f"Fetched member {user_id} via REST in guild {guild_id}")
+        except discord.NotFound:
+            logger.error(f"Member {user_id} not found in guild {guild_id}")
+            return
+        except discord.HTTPException as e:
+            logger.error(f"HTTP error fetching member {user_id} in guild {guild_id}: {e}")
+            return
 
     logger.debug(f"Found member {user_id} in guild {guild_id}, attempting to find role {role_id}")
     role = guild.get_role(int(role_id))
@@ -269,13 +283,27 @@ async def process_verification_result(message):
         logger.info(f"Verification count decremented for guild {guild_id}.")
         await assign_role(guild_id, user_id, role_id)
         await update_user_verification_status(user_id, True)
+
+        # Attempt to DM the user with a success embed
+        try:
+            user_obj = bot.get_user(int(user_id)) or await bot.fetch_user(int(user_id))
+            if user_obj:
+                embed = discord.Embed(
+                    title="You're verified",
+                    description="Your age was verified and your role was assigned.",
+                    color=discord.Color.green(),
+                )
+                await user_obj.send(embed=embed)
+        except Exception as e:
+            logger.debug(f"Unable to DM user {user_id} after verification: {e}")
     elif data['type'] == 'verification_canceled':
         guild_id = data['guild_id']
         user_id = data['user_id']
-        channel_id = data['channel_id']
-        channel = bot.get_channel(int(channel_id))
-        if channel:
-            await channel.send(f"Verification canceled for user <@{user_id}>")
+        channel_id = data.get('channel_id')
+        if channel_id:
+            channel = bot.get_channel(int(channel_id))
+            if channel:
+                await channel.send(f"Verification canceled for user <@{user_id}>")
 
 # Global variable to store the event loop
 main_loop = None
@@ -304,11 +332,50 @@ async def consume_queue():
     # Run start_consuming in a separate thread
     await main_loop.run_in_executor(None, channel.start_consuming)
 
+# -------------------------------------------------------------------
+# Persistent View for Instructions (survives restarts)
+# -------------------------------------------------------------------
+class InstructionsPersistentView(discord.ui.View):
+    """Persistent view to keep the 'Verify Me' button working across restarts."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Verify Me",
+        style=discord.ButtonStyle.success,
+        custom_id="ageverify:instructions:verify",
+    )
+    async def verify_me(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await verify(interaction)
+
 @bot.event
 async def on_ready():
-    logger.info(f'Bot is ready. Logged in as {bot.user}')
     bot.last_startup_time = datetime.now(timezone.utc)
     bot.loop.create_task(consume_queue())
+    # Register persistent views so buttons on existing messages still work after restarts
+    try:
+        bot.add_view(InstructionsPersistentView())
+    except Exception as e:
+        logger.debug(f"Failed to add persistent views: {e}")
+    # Log reinitialization for any guilds that have stored instruction panel IDs
+    try:
+        with session_scope() as session:
+            servers_with_panels = (
+                session.query(Server)
+                .filter(
+                    Server.instructions_channel_id.isnot(None),
+                    Server.instructions_message_id.isnot(None)
+                )
+                .all()
+            )
+            for s in servers_with_panels:
+                # Requested log format
+                logger.info(f"Reinitializing instruction panel for guild ID: {s.server_id}")
+    except Exception as e:
+        logger.debug(f"Unable to enumerate servers for instruction panel reinitialization logs: {e}")
+    
+    # Announce after instruction panel reinitialization is finished
+    logger.info(f'Bot is ready. Syncing commands...')
     
     # # Set the bot's bio/status
     # bio_message = "Use `/get_verify_bot` to add this bot to your discord."
@@ -319,11 +386,12 @@ async def on_ready():
         logger.debug(f"Synced {len(synced)} command(s)")
     except Exception as e:
         logger.error(f"Failed to sync commands: {e}")
+    logger.info(f'Bot is ready. Logged in as {bot.user}')
 
-@bot.tree.command(name="verifyme", description="Start the age verification process")
 async def verify(interaction: discord.Interaction):
+    """Plain function containing the verify flow; reusable by buttons and tests."""
     await interaction.response.defer(ephemeral=True)  # Acknowledge the interaction early
-    logger.debug(f"Received /verify command from user {interaction.user.id} in guild {interaction.guild.id}")
+    logger.debug(f"Received verify flow from user {interaction.user.id} in guild {interaction.guild.id}")
 
     try:
         guild_id = str(interaction.guild.id)
@@ -332,8 +400,10 @@ async def verify(interaction: discord.Interaction):
         with session_scope() as session:
             user = session.query(User).filter_by(discord_id=user_id).first()
             server_config = session.query(Server).filter_by(server_id=guild_id).first()
+            # Copy needed fields before session closes to avoid DetachedInstanceError
+            local_role_id = str(server_config.role_id) if server_config and server_config.role_id else None
 
-            if not server_config or not server_config.role_id or not server_config.subscription_status:
+            if not server_config or not local_role_id or not server_config.subscription_status:
                 await send_error_response(interaction, server_config, guild_id)
                 return
 
@@ -388,34 +458,36 @@ async def verify(interaction: discord.Interaction):
                 await interaction.followup.send("This server has reached its monthly verification limit. Please contact an admin to upgrade the plan or wait until next month.", ephemeral=True)
                 return
 
-            # Proceed with verification if no cooldown or new user
+            # Directly generate a Stripe verification URL and send it (no second button)
             logger.debug(f"Generating Stripe verification URL for user {interaction.user.id}")
-            verification_url = await generate_stripe_verification_url(guild_id, interaction.user.id, server_config.role_id, str(interaction.channel.id))
-
+            verification_url = await generate_stripe_verification_url(
+                guild_id, interaction.user.id, local_role_id, str(interaction.channel.id)
+            )
             if not verification_url:
                 logger.error(f"Failed to generate Stripe verification URL for user {interaction.user.id}")
                 await interaction.followup.send("Failed to initiate the verification process. Please try again later or contact support.", ephemeral=True)
                 return
 
-            logger.debug(f"Successfully generated Stripe verification URL for user {interaction.user.id}")
-
-            # Track verification attempt for cooldown purposes
-            if not user:
-                user = User(discord_id=user_id, verification_status=False)
-                session.add(user)
-            user.set_verification_attempt()
-            session.commit()
-
+            # Track verification attempt and usage
+            await track_verification_attempt(user_id)
             bot.loop.create_task(track_command_usage(guild_id, interaction.user.id, "verify"))
 
-            await interaction.followup.send(f"Click the link below to verify your age. This link is private and should not be shared:\n\n{verification_url}", ephemeral=True)
-            logger.debug(f"Sent verification URL to user {interaction.user.id}")
+            await interaction.followup.send(
+                f"Click the link below to verify your age. This link is private and should not be shared:\n\n{verification_url}",
+                ephemeral=True,
+            )
+            logger.debug(f"Sent verification link to user {interaction.user.id}")
 
     except Exception as e:
         logger.error(f"Unexpected error in verify command: {str(e)}", exc_info=True)
         await interaction.followup.send("An unexpected error occurred. Please try again later or contact support.", ephemeral=True)
 
-    logger.debug(f"Verify command completed for user {interaction.user.id}")
+    logger.debug(f"Verify flow completed for user {interaction.user.id}")
+
+@bot.tree.command(name="verifyme", description="Start the age verification process")
+async def verify_command(interaction: discord.Interaction):
+    """Slash command wrapper that calls the plain verify() function."""
+    await verify(interaction)
 
 async def track_verification_attempt(discord_id):
     logger.debug(f"Tracking verification attempt for user {discord_id}")
@@ -460,14 +532,40 @@ def is_user_in_cooldown(last_verification_attempt):
     return False
 
 async def send_error_response(interaction, server_config, guild_id):
+    def _embed(title: str, desc: str, color: discord.Color) -> discord.Embed:
+        e = discord.Embed(title=title, description=desc, color=color)
+        e.set_footer(text="Age Verification Service")
+        return e
+
     if not server_config:
-        await interaction.followup.send("This server is not configured for verification. Please ask an admin to set up the server using `/setupverify`.", ephemeral=True)
+        await interaction.followup.send(
+            embed=_embed(
+                "Not configured",
+                "This server is not set up. Ask an admin to run /setupverify.",
+                discord.Color.orange(),
+            ),
+            ephemeral=True,
+        )
     elif not server_config.role_id:
         logger.warning(f"No verification role set for guild {guild_id}")
-        await interaction.followup.send("The verification role has not been set for this server. Please ask an admin to set up the role using `/setupverify`.", ephemeral=True)
+        await interaction.followup.send(
+            embed=_embed(
+                "Role not set",
+                "Admins: configure the role with /setupverify before users can verify.",
+                discord.Color.orange(),
+            ),
+            ephemeral=True,
+        )
     elif not server_config.subscription_status:
         logger.warning(f"No active subscription for guild {guild_id}")
-        await interaction.followup.send("This server does not have an active verification subscription.", ephemeral=True)
+        await interaction.followup.send(
+            embed=_embed(
+                "Subscription inactive",
+                "This server doesn't have an active verification subscription.",
+                discord.Color.red(),
+            ),
+            ephemeral=True,
+        )
 
 @bot.tree.command(name="setupverify", description="Set the role and minimum age for verified users")
 @app_commands.describe(role="The role to assign to verified users", minimum_age="The minimum age required for verification")
@@ -591,6 +689,80 @@ async def subscription_status(interaction: discord.Interaction):
 @bot.tree.command(name="ping", description="Check if the bot is responsive")
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message("Pong!", ephemeral=True)
+
+
+@bot.tree.command(name="instructions", description="Admin: Post verification instructions with a button")
+@app_commands.checks.has_permissions(administrator=True)
+async def instructions(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="Age Verification — What to expect",
+        description=(
+            "Already verified before? We'll automatically add the role if you meet this server's age requirement.\n\n"
+            "Not verified yet? Click the 'Verify Me' button. You'll receive a private link to start the secure process."
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(
+        name="How it works",
+        value=(
+            "1) Click 'Verify Me' to receive a private verification link.\n"
+            "2) Open the link and follow the steps powered by Stripe Identity.\n"
+            "3) You'll be asked to take photos of your ID (front and back) and a selfie.\n"
+            "4) Stripe checks that your selfie matches your ID and confirms your age.\n"
+            "5) Once complete, return to Discord—if you meet the minimum age, the role is assigned automatically."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Privacy & Safety",
+        value=(
+            "• Your link is private—do not share it.\n"
+            "• Verification is handled by Stripe Identity.\n"
+            "• Server staff only see your verification status (pass/fail) and apply roles accordingly."
+        ),
+        inline=False,
+    )
+
+    view = InstructionsPersistentView()
+
+    # Upsert canonical instructions message per guild
+    guild_id = str(interaction.guild.id)
+    channel_to_use = interaction.channel
+
+    with session_scope() as session:
+        server = session.query(Server).filter_by(server_id=guild_id).first()
+        # Try updating existing panel if we have stored IDs
+        if server and server.instructions_channel_id and server.instructions_message_id:
+            try:
+                ch = interaction.guild.get_channel(int(server.instructions_channel_id))
+                if ch is None:
+                    ch = bot.get_channel(int(server.instructions_channel_id))
+                if ch is not None:
+                    # Requested log format
+                    logger.info(f"Reinitializing instruction panel for guild ID: {guild_id}")
+                    msg = await ch.fetch_message(int(server.instructions_message_id))
+                    await msg.edit(embed=embed, view=view)
+                    await interaction.response.send_message("Updated existing instructions message.", ephemeral=True)
+                    return
+            except Exception as e:
+                logger.info(f"Existing instructions message not found or not editable; posting new. Reason: {e}")
+
+        # Post a new message and store IDs
+        sent = await channel_to_use.send(embed=embed, view=view)
+        if not server:
+            server = Server(
+                server_id=guild_id,
+                owner_id=str(interaction.guild.owner_id),
+                role_id=None,
+                tier="tier_0",
+                subscription_status=False,
+                minimum_age=18,
+            )
+            session.add(server)
+        server.instructions_channel_id = str(sent.channel.id)
+        server.instructions_message_id = str(sent.id)
+        # Respond to the admin
+        await interaction.response.send_message("Posted instructions message and saved its location.", ephemeral=True)
 
 if __name__ == '__main__':
     bot.run(DISCORD_BOT_TOKEN)
