@@ -5,10 +5,11 @@ services:
       dockerfile: docker/Dockerfile-bot
     ports:
       - "5000:5000"
+    env_file:
+      - .env
     environment:
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
-      # - DATABASE_URL=${DATABASE_URL}
       - DATABASE_URL_VERIFICATION=${DATABASE_URL_VERIFICATION}
       - RABBITMQ_HOST=${RABBITMQ_HOST}
       - RABBITMQ_PORT=${RABBITMQ_PORT}
@@ -17,6 +18,18 @@ services:
       - RABBITMQ_VHOST=${RABBITMQ_VHOST}
       - RABBITMQ_QUEUE_NAME=${RABBITMQ_QUEUE_NAME}
       - DOB_KEY=${DOB_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # RabbitMQ connection resilience (optional tuning)
+      - RABBITMQ_HEARTBEAT=${RABBITMQ_HEARTBEAT:-60}
+      - RABBITMQ_BLOCKED_TIMEOUT=${RABBITMQ_BLOCKED_TIMEOUT:-60}
+      - RABBITMQ_CONN_ATTEMPTS=${RABBITMQ_CONN_ATTEMPTS:-3}
+      - RABBITMQ_RETRY_DELAY=${RABBITMQ_RETRY_DELAY:-2}
+      - RABBITMQ_SOCKET_TIMEOUT=${RABBITMQ_SOCKET_TIMEOUT:-10}
+      # REST member-fetch cache (optional tuning)
+      - REST_TTL_SECONDS=${REST_TTL_SECONDS:-180}
+      - REST_CACHE_MAX=${REST_CACHE_MAX:-10000}
+      - REST_CONCURRENCY=${REST_CONCURRENCY:-8}
+    restart: unless-stopped
 
   stripe-webhook:
     build:
@@ -24,6 +37,8 @@ services:
       dockerfile: docker/Dockerfile-stripe-webhook
     ports:
       - "5431:5431"
+    env_file:
+      - .env
     environment:
       - DATABASE_URL_DJ=${DATABASE_URL_DJ}
       - DATABASE_URL_VERIFICATION=${DATABASE_URL_VERIFICATION}
@@ -36,6 +51,15 @@ services:
       - RABBITMQ_VHOST=${RABBITMQ_VHOST}
       - RABBITMQ_QUEUE_NAME=${RABBITMQ_QUEUE_NAME}
       - DOB_KEY=${DOB_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # RabbitMQ connection resilience (optional tuning)
+      - RABBITMQ_HEARTBEAT=${RABBITMQ_HEARTBEAT:-60}
+      - RABBITMQ_BLOCKED_TIMEOUT=${RABBITMQ_BLOCKED_TIMEOUT:-60}
+      - RABBITMQ_CONN_ATTEMPTS=${RABBITMQ_CONN_ATTEMPTS:-3}
+      - RABBITMQ_RETRY_DELAY=${RABBITMQ_RETRY_DELAY:-2}
+      - RABBITMQ_SOCKET_TIMEOUT=${RABBITMQ_SOCKET_TIMEOUT:-10}
+      - RABBITMQ_PUBLISH_TRIES=${RABBITMQ_PUBLISH_TRIES:-3}
+    restart: unless-stopped
 
   subscription-manager:
     build:
@@ -43,13 +67,25 @@ services:
       dockerfile: docker/Dockerfile-subscription-manager
     ports:
       - "5433:5433"
+    env_file:
+      - .env
     environment:
       - DATABASE_URL_DJ=${DATABASE_URL_DJ}
       - DATABASE_URL_VERIFICATION=${DATABASE_URL_VERIFICATION}
+      - DATABASE_URL_VRCVERIFY=${DATABASE_URL_VRCVERIFY}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
       - STRIPE_PAYMENT_WEBHOOK_SECRET=${STRIPE_PAYMENT_WEBHOOK_SECRET}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    restart: unless-stopped
 
   subscription-checker:
     build:
       context: ../../
       dockerfile: docker/Dockerfile-subscription-checker
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_VERIFICATION=${DATABASE_URL_VERIFICATION}
+      - DATABASE_URL_DJ=${DATABASE_URL_DJ}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    restart: unless-stopped
