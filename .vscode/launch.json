@@ -22,17 +22,6 @@
             "console": "integratedTerminal"
         },
         {
-            "name": "Flask: Discord Login",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/src/discord_login_for_checkout.py",
-            "console": "integratedTerminal",
-            "env": {
-                "FLASK_APP": "src/discord_login_for_checkout",
-                "FLASK_ENV": "development"
-            }
-        },
-        {
             "name": "Flask: Stripe Subcription Webhook",
             "type": "debugpy",
             "request": "launch",
@@ -42,6 +31,13 @@
                 "FLASK_APP": "src/subscription_manager",
                 "FLASK_ENV": "development"
             }
+        },
+        {
+            "name": "Python: Subscription Checker",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/subscription_checker.py",
+            "console": "integratedTerminal"
         }
     ]
 }
