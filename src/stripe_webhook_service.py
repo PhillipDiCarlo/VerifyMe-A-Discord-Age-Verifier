@@ -2,6 +2,7 @@ import hashlib
 import os
 import json
 import logging
+import time
 from datetime import datetime
 from contextlib import contextmanager
 from typing import Dict, Any
@@ -63,12 +64,27 @@ RABBITMQ_VHOST = os.getenv('RABBITMQ_VHOST')
 RABBITMQ_QUEUE_NAME = os.getenv('RABBITMQ_QUEUE_NAME')
 
 credentials = pika.PlainCredentials(RABBITMQ_USERNAME, RABBITMQ_PASSWORD)
-parameters = pika.ConnectionParameters(
-    host=RABBITMQ_HOST,
-    port=RABBITMQ_PORT,
-    virtual_host=RABBITMQ_VHOST,
-    credentials=credentials
-)
+
+
+def _rabbitmq_parameters() -> pika.ConnectionParameters:
+    """Build connection parameters with heartbeats/timeouts so stale connections get detected."""
+    heartbeat = int(os.getenv('RABBITMQ_HEARTBEAT', '60'))
+    blocked_timeout = int(os.getenv('RABBITMQ_BLOCKED_TIMEOUT', '60'))
+    connection_attempts = int(os.getenv('RABBITMQ_CONN_ATTEMPTS', '3'))
+    retry_delay = float(os.getenv('RABBITMQ_RETRY_DELAY', '2'))
+    socket_timeout = float(os.getenv('RABBITMQ_SOCKET_TIMEOUT', '10'))
+
+    return pika.ConnectionParameters(
+        host=RABBITMQ_HOST,
+        port=RABBITMQ_PORT,
+        virtual_host=RABBITMQ_VHOST,
+        credentials=credentials,
+        heartbeat=heartbeat,
+        blocked_connection_timeout=blocked_timeout,
+        connection_attempts=connection_attempts,
+        retry_delay=retry_delay,
+        socket_timeout=socket_timeout,
+    )
 
 @contextmanager
 def session_scope():
@@ -102,11 +118,13 @@ def decrypt_dob(encrypted_dob: str) -> datetime:
     dob_str = dob_bytes.decode('utf-8')  # Convert bytes back to string
     return datetime.strptime(dob_str, '%Y-%m-%d')  # Convert string to datetime object
 
-def send_to_queue(message: Dict[str, Any], max_retries: int = 3) -> None:
-    retries = 0
-    while retries < max_retries:
+def send_to_queue(message: Dict[str, Any], max_retries: int = None) -> None:
+    max_retries = max_retries if max_retries is not None else int(os.getenv('RABBITMQ_PUBLISH_TRIES', '3'))
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        connection = None
         try:
-            connection = pika.BlockingConnection(parameters)
+            connection = pika.BlockingConnection(_rabbitmq_parameters())
             channel = connection.channel()
             channel.queue_declare(queue=RABBITMQ_QUEUE_NAME, durable=True)
             channel.basic_publish(
@@ -115,15 +133,21 @@ def send_to_queue(message: Dict[str, Any], max_retries: int = 3) -> None:
                 body=json.dumps(message),
                 properties=pika.BasicProperties(delivery_mode=2)  # Make message persistent
             )
-            connection.close()
             logger.debug("Message sent to queue successfully")
             logger.debug(f"Sent message to queue: {message}")
             return
         except AMQPError as e:
-            logger.warning(f"Failed to send message to queue: {str(e)}. Retry {retries + 1}/{max_retries}")
-            retries += 1
-    
-    logger.error(f"Failed to send message to queue after {max_retries} attempts")
+            last_exc = e
+            logger.warning(f"Failed to send message to queue (attempt {attempt}/{max_retries}); retrying...", exc_info=True)
+            time.sleep(min(10.0, 1.5 * attempt))
+        finally:
+            try:
+                if connection and connection.is_open:
+                    connection.close()
+            except Exception:
+                pass
+
+    logger.error(f"Failed to send message to queue after {max_retries} attempts", exc_info=last_exc)
 
 @app.route('/stripe_webhook', methods=['POST'])
 def stripe_webhook() -> tuple:
