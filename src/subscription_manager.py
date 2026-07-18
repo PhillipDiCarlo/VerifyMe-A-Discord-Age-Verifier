@@ -56,7 +56,7 @@ class Server(BaseVerification):
 # ------------------------
 #  DJ SERVICE
 # ------------------------
-class User(BaseDJ):
+class DJUser(BaseDJ):
     __tablename__ = 'users'
     stripe_subscription_id = Column(String(255), primary_key=True)  # Set as primary key
     discord_id = Column(String(50), nullable=True)
@@ -68,7 +68,7 @@ class User(BaseDJ):
 # ------------------------
 #  VRCVerify SERVICE
 # ------------------------
-class User(BaseVRCVerification):
+class VRCVerifyServer(BaseVRCVerification):
     __tablename__ = 'servers'
     id = Column(Integer, primary_key=True)
     server_id = Column(String(30), nullable=False, unique=True)
@@ -463,7 +463,7 @@ def handle_dj_checkout_session(session):
 
     try:
         with session_scope('dj') as db_session:
-            user = db_session.query(User).filter_by(stripe_subscription_id=subscription_id).first()
+            user = db_session.query(DJUser).filter_by(stripe_subscription_id=subscription_id).first()
             if user:
                 user.discord_id = discord_id
                 user.email = customer_email
@@ -473,7 +473,7 @@ def handle_dj_checkout_session(session):
                 user.last_renewal_date = user.subscription_start_date
                 logging.info(f"Finalized setup for user {discord_id} with subscription ID {subscription_id}.")
             else:
-                new_user = User(
+                new_user = DJUser(
                     discord_id=discord_id,
                     stripe_subscription_id=subscription_id,
                     email=customer_email,
@@ -495,7 +495,7 @@ def handle_dj_subscription_created(subscription_id, status, metadata, current_pe
 
     try:
         with session_scope('dj') as db_session:
-            user = db_session.query(User).filter_by(stripe_subscription_id=subscription_id).first()
+            user = db_session.query(DJUser).filter_by(stripe_subscription_id=subscription_id).first()
             if user:
                 user.active_subscription = True
                 user.discord_id = discord_id or user.discord_id
@@ -503,7 +503,7 @@ def handle_dj_subscription_created(subscription_id, status, metadata, current_pe
                     user.subscription_start_date = current_period_start_dt or datetime.now(timezone.utc)
                 user.last_renewal_date = current_period_start_dt or datetime.now(timezone.utc)
             else:
-                new_user = User(
+                new_user = DJUser(
                     stripe_subscription_id=subscription_id,
                     discord_id=discord_id,
                     active_subscription=True,
@@ -523,7 +523,7 @@ def handle_dj_subscription_update(subscription_id, status, metadata, current_per
 
     try:
         with session_scope('dj') as db_session:
-            user = db_session.query(User).filter_by(stripe_subscription_id=subscription_id).first()
+            user = db_session.query(DJUser).filter_by(stripe_subscription_id=subscription_id).first()
             if user:
                 # Active if status is 'active'; let Stripe handle grace periods
                 user.active_subscription = (status == 'active')
@@ -536,7 +536,7 @@ def handle_dj_subscription_update(subscription_id, status, metadata, current_per
 
                 logging.info(f"Updated existing user for subscription ID {subscription_id}, active={user.active_subscription}")
             else:
-                new_user = User(
+                new_user = DJUser(
                     discord_id=discord_id,
                     stripe_subscription_id=subscription_id,
                     active_subscription=(status == 'active'),
@@ -558,7 +558,7 @@ def handle_dj_subscription_deleted(subscription_id, metadata):
 
     try:
         with session_scope('dj') as db_session:
-            user = db_session.query(User).filter_by(stripe_subscription_id=subscription_id).first()
+            user = db_session.query(DJUser).filter_by(stripe_subscription_id=subscription_id).first()
             if user:
                 user.active_subscription = False
                 logging.info(f"Marked DJ subscription {subscription_id} inactive.")
@@ -603,8 +603,7 @@ def handle_vrcverify_checkout_session(session):
 
     try:
         with session_scope("vrcverify") as db_session:
-            # 'servers' table is mapped by your class User
-            server = db_session.query(User).filter_by(server_id=guild_id).first()
+            server = db_session.query(VRCVerifyServer).filter_by(server_id=guild_id).first()
             if server:
                 server.subscription_status = True
                 server.subscription_start_date = datetime.now(timezone.utc)
@@ -614,7 +613,7 @@ def handle_vrcverify_checkout_session(session):
                 server.last_renewal_date = datetime.now(timezone.utc)
 
             else:
-                new_server = User(
+                new_server = VRCVerifyServer(
                     server_id=guild_id,
                     owner_id=discord_id,
                     subscription_status=True,
@@ -648,7 +647,7 @@ def handle_vrcverify_subscription_created(subscription_id, status, metadata, cur
 
     try:
         with session_scope("vrcverify") as db_session:
-            server = db_session.query(User).filter_by(server_id=guild_id).first()
+            server = db_session.query(VRCVerifyServer).filter_by(server_id=guild_id).first()
             if server:
                 server.subscription_status = True
                 if current_period_start_dt:
@@ -657,7 +656,7 @@ def handle_vrcverify_subscription_created(subscription_id, status, metadata, cur
                     server.subscription_start_date = current_period_start_dt or datetime.now(timezone.utc)
                 server.stripe_subscription_id = subscription_id
             else:
-                new_server = User(
+                new_server = VRCVerifyServer(
                     server_id=guild_id,
                     owner_id=metadata.get('discorduseridnotyourusername', 'UNKNOWN'),
                     subscription_status=True,
@@ -685,7 +684,7 @@ def handle_vrcverify_subscription_update(subscription_id, status, metadata, curr
         product_id = subscription['items']['data'][0]['price']['product']
 
         with session_scope('vrcverify') as db_session:
-            server = db_session.query(User).filter_by(server_id=guild_id).first()
+            server = db_session.query(VRCVerifyServer).filter_by(server_id=guild_id).first()
             if server:
                 server.subscription_status = (status == 'active')
                 # Update last_renewal_date if we have a new current_period_start
@@ -695,7 +694,7 @@ def handle_vrcverify_subscription_update(subscription_id, status, metadata, curr
                 # Keep subscription_start_date for analytics, no immediate changes
                 server.stripe_subscription_id = subscription_id
 
-                logging.info(f"Updated [VRCVerify] guild {guild_id}, active: {server.subscription_status}, tier: {server.tier}")
+                logging.info(f"Updated [VRCVerify] guild {guild_id}, active: {server.subscription_status}")
 
         logging.info(f"[VRCVerify] Subscription update successful for guild {guild_id}.")
     except Exception as e:
@@ -706,7 +705,7 @@ def handle_vrcverify_subscription_deleted(subscription_id, metadata):
 
     try:
         with session_scope('vrcverify') as db_session:
-            server = db_session.query(Server).filter_by(stripe_subscription_id=subscription_id).first()
+            server = db_session.query(VRCVerifyServer).filter_by(stripe_subscription_id=subscription_id).first()
             if server:
                 server.subscription_status = False
                 # We do NOT reset last_renewal_date, we keep it for historical reference
