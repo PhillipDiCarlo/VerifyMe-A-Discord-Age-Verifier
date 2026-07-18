@@ -22,6 +22,10 @@ logging.basicConfig(
 
 # -------------------------------------------------------------------
 #  Verification DB Setup
+#
+#  This service is scoped to the VerifyMe verification database ONLY. It
+#  must never construct a connection to any other database -- the DJ and
+#  VRCVerify products no longer bill through Stripe/this repo.
 # -------------------------------------------------------------------
 DATABASE_URL_VERIFICATION = os.getenv('DATABASE_URL_VERIFICATION')
 engine_verification = create_engine(DATABASE_URL_VERIFICATION)
@@ -61,47 +65,12 @@ def session_scope_verification():
 
 
 # -------------------------------------------------------------------
-#  DJ DB Setup
-# -------------------------------------------------------------------
-DATABASE_URL_DJ = os.getenv('DATABASE_URL_DJ')
-engine_dj = create_engine(DATABASE_URL_DJ)
-BaseDJ = declarative_base()
-SessionDJ = sessionmaker(bind=engine_dj)
-
-class User(BaseDJ):
-    __tablename__ = 'users'
-    stripe_subscription_id = Column(String(255), primary_key=True)
-    discord_id = Column(String(50), nullable=True)
-    active_subscription = Column(Boolean, default=False)
-    email = Column(String(255), nullable=True)
-    subscription_start_date = Column(DateTime(timezone=True), nullable=True)
-    # Must exist in your actual DB via migration:
-    last_renewal_date = Column(DateTime(timezone=True), nullable=True)
-
-BaseDJ.metadata.create_all(engine_dj)
-
-@contextmanager
-def session_scope_dj():
-    """Context manager for the DJ DB session."""
-    session = SessionDJ()
-    try:
-        yield session
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        logging.error(f"[DJ DB] Error during session scope: {e}")
-        raise
-    finally:
-        session.close()
-
-# -------------------------------------------------------------------
 #  Weekly Fallback Check
 # -------------------------------------------------------------------
 def check_subscriptions():
     """
     Runs once a week (Sunday 23:59) as a fallback.
-    1) Checks servers in the Verification DB for lapses using last_renewal_date.
-    2) Checks users in the DJ DB for lapses (active_subscription + last_renewal_date).
+    Checks servers in the Verification DB for lapses using last_renewal_date.
     """
     logging.info("[CHECKER] Starting weekly subscription check...")
 
@@ -109,7 +78,6 @@ def check_subscriptions():
     now = datetime.now(timezone.utc)
     one_month_ago = now - timedelta(days=31)
 
-    # ----- 1) Verification DB -----
     try:
         with session_scope_verification() as db_session_v:
             servers = db_session_v.query(Server).filter(
@@ -125,23 +93,6 @@ def check_subscriptions():
 
     except Exception as e:
         logging.error(f"[VERIFY_DB] Error checking servers: {e}")
-
-    # ----- 2) DJ DB -----
-    try:
-        with session_scope_dj() as db_session_dj:
-            dj_users = db_session_dj.query(User).filter(
-                User.active_subscription == True,
-                User.last_renewal_date <= one_month_ago
-            ).all()
-
-            for user in dj_users:
-                logging.info(
-                    f"[DJ_DB] Marking user {user.discord_id} (sub={user.stripe_subscription_id}) as inactive (lapsed)."
-                )
-                user.active_subscription = False
-
-    except Exception as e:
-        logging.error(f"[DJ_DB] Error checking users: {e}")
 
     logging.info("[CHECKER] Weekly check completed.")
 
