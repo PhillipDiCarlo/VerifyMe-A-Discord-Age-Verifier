@@ -61,17 +61,96 @@ Session = sessionmaker(bind=engine)
 # Initialize the Discord bot with intents (avoid heavy member chunking at startup)
 intents = discord.Intents.default()
 
+# TTL cache and concurrency limit for REST member fetches (no Members intent needed)
+REST_TTL_SECONDS = int(os.getenv('REST_TTL_SECONDS', '180'))
+REST_CACHE_MAX = int(os.getenv('REST_CACHE_MAX', '10000'))
+REST_CONCURRENCY = int(os.getenv('REST_CONCURRENCY', '8'))
+
+
+class _TTLCache:
+    def __init__(self, maxsize: int, ttl: int):
+        self.maxsize = maxsize
+        self.ttl = ttl
+        self._store = {}
+
+    def get(self, key):
+        item = self._store.get(key)
+        if not item:
+            return None
+        expires_at, value = item
+        if expires_at < asyncio.get_running_loop().time():
+            self._store.pop(key, None)
+            return None
+        return value
+
+    def set(self, key, value):
+        if len(self._store) >= self.maxsize:
+            try:
+                self._store.pop(next(iter(self._store)))
+            except StopIteration:
+                pass
+        self._store[key] = (asyncio.get_running_loop().time() + self.ttl, value)
+
+
+_member_fetch_cache = _TTLCache(REST_CACHE_MAX, REST_TTL_SECONDS)
+_rest_semaphore = asyncio.Semaphore(REST_CONCURRENCY)
+
+
+async def fetch_member_cached(guild, user_id: int):
+    """Fetch a guild member via REST with a short TTL cache and bounded concurrency.
+
+    Raises discord.NotFound / discord.HTTPException like guild.fetch_member.
+    """
+    key = (guild.id, user_id)
+    cached = _member_fetch_cache.get(key)
+    if cached:
+        return cached
+    async with _rest_semaphore:
+        member = await guild.fetch_member(user_id)
+        _member_fetch_cache.set(key, member)
+        return member
+
+
 class MyBot(discord.Client):
     def __init__(self):
         # Disable guild member chunking at startup to speed up readiness
         super().__init__(intents=intents, chunk_guilds_at_startup=False)
         self.tree = app_commands.CommandTree(self)
         self.last_startup_time = None
+        self.background_tasks_started = False
 
     async def setup_hook(self):
+        # Register persistent views so buttons on existing messages work after restarts
+        self.add_view(InstructionsPersistentView())
         await self.tree.sync()
 
 bot = MyBot()
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Handle common slash-command errors without noisy tracebacks."""
+    original = getattr(error, "original", error)
+
+    if isinstance(original, app_commands.MissingPermissions):
+        missing = ", ".join(original.missing_permissions)
+        msg = f"You don't have permission to use this command. Missing permission(s): {missing}."
+    elif isinstance(original, app_commands.NoPrivateMessage):
+        msg = "This command can only be used in a server (not in DMs)."
+    elif isinstance(original, app_commands.CheckFailure):
+        msg = "You can't use this command here."
+    else:
+        logger.error("Unhandled app command error", exc_info=original)
+        msg = "Something went wrong while running that command."
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        # If we can't respond (e.g., already responded and followup failed), just swallow.
+        pass
 
 # Stripe setup
 stripe.api_key = STRIPE_SECRET_KEY
@@ -216,7 +295,7 @@ async def assign_role(guild_id, user_id, role_id):
     if not member:
         # Fallback to REST fetch to avoid requiring Members intent/cache
         try:
-            member = await guild.fetch_member(int(user_id))
+            member = await fetch_member_cached(guild, int(user_id))
             logger.debug(f"Fetched member {user_id} via REST in guild {guild_id}")
         except discord.NotFound:
             logger.error(f"Member {user_id} not found in guild {guild_id}")
@@ -351,45 +430,43 @@ class InstructionsPersistentView(discord.ui.View):
 @bot.event
 async def on_ready():
     bot.last_startup_time = datetime.now(timezone.utc)
-    bot.loop.create_task(consume_queue())
-    # Register persistent views so buttons on existing messages still work after restarts
-    try:
-        bot.add_view(InstructionsPersistentView())
-    except Exception as e:
-        logger.debug(f"Failed to add persistent views: {e}")
-    # Log reinitialization for any guilds that have stored instruction panel IDs
-    try:
-        with session_scope() as session:
-            servers_with_panels = (
-                session.query(Server)
-                .filter(
-                    Server.instructions_channel_id.isnot(None),
-                    Server.instructions_message_id.isnot(None)
+
+    # on_ready also fires on gateway reconnects; only start background work once
+    if not bot.background_tasks_started:
+        bot.background_tasks_started = True
+        bot.loop.create_task(consume_queue())
+
+        # Log reinitialization for any guilds that have stored instruction panel IDs
+        try:
+            with session_scope() as session:
+                servers_with_panels = (
+                    session.query(Server)
+                    .filter(
+                        Server.instructions_channel_id.isnot(None),
+                        Server.instructions_message_id.isnot(None)
+                    )
+                    .all()
                 )
-                .all()
-            )
-            for s in servers_with_panels:
-                # Requested log format
-                logger.info(f"Reinitializing instruction panel for guild ID: {s.server_id}")
-    except Exception as e:
-        logger.debug(f"Unable to enumerate servers for instruction panel reinitialization logs: {e}")
-    
-    # Announce after instruction panel reinitialization is finished
-    logger.info(f'Bot is ready. Syncing commands...')
-    
+                for s in servers_with_panels:
+                    # Requested log format
+                    logger.info(f"Reinitializing instruction panel for guild ID: {s.server_id}")
+        except Exception as e:
+            logger.debug(f"Unable to enumerate servers for instruction panel reinitialization logs: {e}")
+
     # # Set the bot's bio/status
     # bio_message = "Use `/get_verify_bot` to add this bot to your discord."
     # await bot.change_presence(activity=discord.Game(name=bio_message))
 
-    try:
-        synced = await bot.tree.sync()
-        logger.debug(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        logger.error(f"Failed to sync commands: {e}")
     logger.info(f'Bot is ready. Logged in as {bot.user}')
 
 async def verify(interaction: discord.Interaction):
     """Plain function containing the verify flow; reusable by buttons and tests."""
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Please use this in the server you want to verify in, not in DMs.", ephemeral=True
+        )
+        return
+
     await interaction.response.defer(ephemeral=True)  # Acknowledge the interaction early
     logger.debug(f"Received verify flow from user {interaction.user.id} in guild {interaction.guild.id}")
 
@@ -485,6 +562,7 @@ async def verify(interaction: discord.Interaction):
     logger.debug(f"Verify flow completed for user {interaction.user.id}")
 
 @bot.tree.command(name="verifyme", description="Start the age verification process")
+@app_commands.guild_only()
 async def verify_command(interaction: discord.Interaction):
     """Slash command wrapper that calls the plain verify() function."""
     await verify(interaction)
@@ -568,6 +646,7 @@ async def send_error_response(interaction, server_config, guild_id):
         )
 
 @bot.tree.command(name="setupverify", description="Set the role and minimum age for verified users")
+@app_commands.guild_only()
 @app_commands.describe(role="The role to assign to verified users", minimum_age="The minimum age required for verification")
 async def setupVerify(interaction: discord.Interaction, role: discord.Role, minimum_age: int):
     if not interaction.user.guild_permissions.administrator:
@@ -602,6 +681,7 @@ async def get_verify_bot(interaction: discord.Interaction):
     await interaction.response.send_message(message, ephemeral=True)
 
 @bot.tree.command(name="get_subscription", description="Get the subscription link for the server")
+@app_commands.guild_only()
 async def get_subscription(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
@@ -610,6 +690,7 @@ async def get_subscription(interaction: discord.Interaction):
     await interaction.response.send_message("To activate a subscription, please visit: https://esattotech.com/pricing/", ephemeral=True)
 
 @bot.tree.command(name="server_info", description="Display current server configuration for verification")
+@app_commands.guild_only()
 @app_commands.checks.has_permissions(administrator=True)
 async def server_info(interaction: discord.Interaction):
     guild_id = str(interaction.guild.id)
@@ -692,6 +773,7 @@ async def ping(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="instructions", description="Admin: Post verification instructions with a button")
+@app_commands.guild_only()
 @app_commands.checks.has_permissions(administrator=True)
 async def instructions(interaction: discord.Interaction):
     embed = discord.Embed(
