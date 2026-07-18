@@ -112,6 +112,7 @@ instance/
 .env
 
 # My personal files
+BOT_NOTES.md
 encrypt.py
 *.xlsx
 tree.txt
