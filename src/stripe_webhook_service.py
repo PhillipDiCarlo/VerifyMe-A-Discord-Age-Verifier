@@ -131,9 +131,6 @@ def stripe_webhook() -> tuple:
     payload = request.data.decode('utf-8')
     sig_header = request.headers.get('Stripe-Signature')
 
-    logger.debug(f"Payload: {payload}")
-    logger.debug(f"Signature Header: {sig_header}")
-
     # Signature verification is mandatory. ALLOW_UNSIGNED_WEBHOOKS is an explicit
     # opt-in for local testing only and must never be set in production.
     if os.getenv('ALLOW_UNSIGNED_WEBHOOKS', '').lower() in ('1', 'true', 'yes') and request.is_json:
@@ -169,12 +166,11 @@ def stripe_webhook() -> tuple:
 def handle_verification_verified(session_id: str) -> None:
     try:
         # Retrieve the verification session from Stripe, expanding to include DOB
+        # Note: do not log the session or verified_outputs — they contain PII (DOB, document data)
         session = stripe.identity.VerificationSession.retrieve(
             session_id,
             expand=['verified_outputs.dob']
         )
-        logger.debug(f"Verification session: {session}")
-        logger.debug(f"Verified outputs: {session.verified_outputs}")
     except Exception as e:
         logger.error(f"Failed to retrieve verification session: {str(e)}")
         return

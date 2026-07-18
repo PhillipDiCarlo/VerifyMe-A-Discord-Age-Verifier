@@ -143,11 +143,10 @@ def stripe_webhook():
     payload = request.get_data(as_text=True)
     sig_header = request.headers.get('Stripe-Signature')
 
-    logging.info(f"Received webhook: {payload}")
-    logging.info(f"Signature header: {sig_header}")
-
     try:
+        # Do not log the raw payload — it contains customer emails and billing details
         event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
+        logging.info(f"Received Stripe webhook event: {event['type']}")
     except ValueError as e:
         # Invalid payload
         logging.error(f"Invalid payload: {e}")
