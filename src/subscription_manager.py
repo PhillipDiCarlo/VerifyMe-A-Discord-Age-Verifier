@@ -191,7 +191,7 @@ def process_event(event):
                     handle_verification_checkout_session(session_obj)
                     
                 # VRCVerify Bot
-                elif product_id in PRODUCT_ID_VRCVERIFY:
+                elif product_id == PRODUCT_ID_VRCVERIFY:
                     handle_vrcverify_checkout_session(session_obj)
 
         elif event_type == 'customer.subscription.created':
@@ -214,7 +214,7 @@ def process_event(event):
             elif product_id in PRODUCT_ID_TO_TIER:
                 handle_verification_subscription_created(subscription_id, status, metadata, current_period_start_dt)
             # VRCVerify
-            elif product_id in PRODUCT_ID_VRCVERIFY:
+            elif product_id == PRODUCT_ID_VRCVERIFY:
                 handle_vrcverify_subscription_created(subscription_id, status, metadata, current_period_start_dt)
 
         elif event_type == 'customer.subscription.updated':
@@ -233,7 +233,7 @@ def process_event(event):
                 handle_dj_subscription_update(subscription_id, status, metadata, current_period_start_dt)
             elif product_id in PRODUCT_ID_TO_TIER:
                 handle_verification_subscription_update(subscription_id, status, metadata, current_period_start_dt)
-            elif product_id in PRODUCT_ID_VRCVERIFY:
+            elif product_id == PRODUCT_ID_VRCVERIFY:
                 handle_vrcverify_subscription_update(subscription_id, status, metadata, current_period_start_dt)
 
         elif event_type == 'customer.subscription.deleted':
@@ -246,7 +246,7 @@ def process_event(event):
                 handle_dj_subscription_deleted(subscription_id, metadata)
             elif product_id in PRODUCT_ID_TO_TIER:
                 handle_verification_subscription_deleted(subscription_id, metadata)
-            elif product_id in PRODUCT_ID_VRCVERIFY:
+            elif product_id == PRODUCT_ID_VRCVERIFY:
                 handle_vrcverify_subscription_deleted(subscription_id, metadata)
     
     except Exception as e:
