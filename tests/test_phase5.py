@@ -85,7 +85,9 @@ def test_sku_maps_load_from_env():
         'DISCORD_SKU_TIER_1': '111', 'DISCORD_SKU_TIER_5': '555',
         'DISCORD_SKU_TOKENS_25': '2525',
     }
-    with patch.dict(os.environ, env):
+    # clear=True so any real DISCORD_SKU_* values from a developer's .env
+    # can't leak into the assertion.
+    with patch.dict(os.environ, env, clear=True):
         tiers = billing._load_sku_tier_map()
         packs = billing._load_sku_token_pack_map()
     assert tiers == {'111': {'tier': 'tier_1', 'tokens': 10},
