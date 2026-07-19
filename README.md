@@ -1,88 +1,118 @@
-# Discord Age Verification Bot
+# VerifyMe — Discord Age Verification
 
-## Description
-This Discord bot provides age verification functionality for Discord servers using Stripe's identity verification service. It allows server administrators to set up age verification requirements and automatically assigns roles to verified users.
+VerifyMe is a commercial Discord bot that verifies users' ages with real
+government ID checks via **Stripe Identity**, then assigns a server-configured
+role to verified users. Server owners subscribe to a monthly tier that grants a
+number of verification tokens; already-verified users can join any subscribed
+server and get their role instantly without re-verifying.
 
-## Features
-- Age verification using Stripe Identity
-- Customizable role assignment for verified users
-- Tiered subscription system for Discord servers
-- Cooldown period for verification attempts
-- Support for multiple countries (based on Stripe's supported regions)
-- Analytics tracking for command usage
+## Architecture
 
-## Prerequisites
-- Python 3.7+
-- Discord Bot Token
-- Stripe API Keys
-- PostgreSQL database
-- RabbitMQ server
+Four services (each its own Docker image) around PostgreSQL and RabbitMQ:
 
-## Installation
+| Service | Entry point | Role |
+|---|---|---|
+| discord-bot | `src/bot.py` | Slash commands, verification flow, role assignment, RabbitMQ consumer |
+| stripe-webhook | `src/stripe_webhook_service.py` (gunicorn) | Receives Stripe Identity webhooks, stores encrypted DOB, queues results |
+| subscription-manager | `src/subscription_manager.py` (gunicorn) | Receives Stripe Billing webhooks, manages tiers/tokens/renewals |
+| subscription-checker | `src/subscription_checker.py` | Scheduled job that deactivates lapsed subscriptions |
 
-1. Clone the repository:
-   ```
-   git clone https://github.com/yourusername/discord-age-verification-bot.git
-   cd discord-age-verification-bot
-   ```
+Shared plumbing:
 
-2. Install required packages:
-   ```
-   pip install -r requirements.txt
-   ```
+- **`src/models.py`** — single source of truth for the schema (`users`,
+  `servers`, `command_usage`), the engine, and `session_scope()`. This repo
+  connects to **`verify_me_database` only** (`DATABASE_URL_VERIFICATION`);
+  never add another database.
+- **Alembic** (`alembic/`) — schema migrations. Deploys run
+  `alembic upgrade head`; `alembic check` must report zero drift.
+- **`src/locales.py`** — all user-facing strings, 12 languages. Lookup order:
+  server-configured language → user's Discord client language → English.
+- **RabbitMQ** — `stripe-webhook` publishes verification results; the bot
+  consumes them and assigns roles.
+- Dates of birth are stored **Fernet-encrypted** (`DOB_KEY`); the bot decrypts
+  only to compare against a server's minimum age.
 
-3. Set up your environment variables in a `.env` file:
-   ```
-   DISCORD_BOT_TOKEN=your_discord_bot_token
-   TEST_STRIPE_SECRET_KEY=your_test_stripe_secret_key
-   STRIPE_SECRET_KEY=your_stripe_secret_key
-   STRIPE_RESTRICTED_SECRET_KEY=your_stripe_restricted_secret_key
-   STRIPE_WEBHOOK_SECRET=your_stripe_webhook_secret
-   TEST_STRIPE_WEBHOOK_SECRET=your_test_stripe_webhook_secret
-   DATABASE_URL=your_database_url
-   SECRET_KEY=your_flask_secret_key
-   RABBITMQ_HOST=your_rabbitmq_host
-   RABBITMQ_PORT=your_rabbitmq_port
-   RABBITMQ_USERNAME=your_rabbitmq_username
-   RABBITMQ_PASSWORD=your_rabbitmq_password
-   RABBITMQ_VHOST=your_rabbitmq_vhost
-   RABBITMQ_QUEUE_NAME=your_rabbitmq_queue_name
-   ```
+## Slash commands
 
-## Usage
+| Command | Who | What |
+|---|---|---|
+| `/verifyme` | anyone | Start verification (or instantly re-assign the role if already verified and old enough) |
+| `/setupverify role minimum_age [unverified-role]` | admin | Set the verified role, minimum age, and optional role to remove on success |
+| `/settings` | admin | Paged settings: minimum age, language, auto-verify on join, custom success DM, unverified role |
+| `/instructions` | admin | Post/update the instruction panel with its persistent **Verify Me** button |
+| `/server_info` | admin | Current configuration, tier, and remaining verifications |
+| `/get_verify_bot` | anyone | Link to add the bot |
+| `/get_subscription` | admin | Subscription/pricing link |
+| `/ping` | anyone | Liveness check |
 
-1. Start the Flask server to handle webhooks:
-   ```
-   python stripe_webhook_service.py
-   ```
+The bot also auto-verifies already-verified users when they join a server
+(`on_member_join`, requires the **Server Members** privileged intent; can be
+disabled per server in `/settings`).
 
-2. Start the bot:
-   ```
-   python bot.py
-   ```
+## Environment variables
 
-3. In a Discord server, use the following commands:
-   - `/verify`: Initiates the age verification process
-   - `/set_role @Role`: (Admin only) Sets the role to be assigned to verified users
-   - `/set_subscription [tier]`: (Admin only) Sets the subscription tier for the server
-   - `/server_info`: (Admin only) Displays the current server configuration
-   - `/subscription_status`: (Admin only) Shows detailed subscription status
-   - `/verification_logs`: (Admin only) View recent verification actions
-   - `/ping`: Check if the bot is responsive
+Copy `.env.example` to `.env` and fill it in. Required:
 
-## Configuration
-- Set up a Stripe webhook in your Stripe dashboard to send 'identity.verification_session.verified' events to your `/stripe_webhook` endpoint.
-- Modify the `tier_requirements` dictionary in the code to adjust the member count limits for each subscription tier.
-- Update the `COOLDOWN_PERIOD` constant to change the cooldown duration between verification attempts.
+- `DISCORD_BOT_TOKEN`
+- `STRIPE_SECRET_KEY`, `STRIPE_RESTRICTED_SECRET_KEY`,
+  `STRIPE_WEBHOOK_SECRET` (Identity), `STRIPE_PAYMENT_WEBHOOK_SECRET` (Billing)
+- `DATABASE_URL_VERIFICATION` — the only database URL this repo reads
+- `RABBITMQ_HOST` / `RABBITMQ_PORT` / `RABBITMQ_USERNAME` /
+  `RABBITMQ_PASSWORD` / `RABBITMQ_VHOST` / `RABBITMQ_QUEUE_NAME`
+- `DOB_KEY` — Fernet key for DOB encryption
 
-## Contributing
+Optional tuning knobs (RabbitMQ heartbeats/retries, REST member-fetch cache,
+instruction-panel refresh trigger, log levels) are documented inline in
+`.env.example`. Never set `ALLOW_UNSIGNED_WEBHOOKS` outside local testing.
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+## Running
+
+**Docker (production):**
+
+```bash
+docker compose -f config/other_configs/docker-compose.yml up -d --build
+```
+
+Each image installs only its own pinned dependency set
+(`config/other_configs/requirements-<service>.txt`).
+
+**Local development:**
+
+```bash
+python -m venv venv
+venv/Scripts/pip install -r config/other_configs/requirements-dev.txt
+python src/bot.py                     # bot
+python src/stripe_webhook_service.py  # webhook service, etc.
+```
+
+**Database migrations** (first deploy of a schema change):
+
+```bash
+alembic upgrade head   # reads DATABASE_URL_VERIFICATION from .env
+alembic check          # should report no drift
+```
+
+## Tests
+
+```bash
+pytest tests/
+```
+
+The suite is fully self-contained: `tests/conftest.py` forces an in-memory
+sqlite database *before any source import* and hard-fails if any service ever
+binds to a non-sqlite engine, so tests can never touch a real database. CI
+(`.github/workflows/tests.yml`) runs the suite plus an Alembic
+upgrade-from-zero/drift check on every PR.
+
+## Stripe configuration
+
+- **Identity webhook** → `/stripe_webhook` (stripe-webhook service): send
+  `identity.verification_session.verified` / `...processing` / `...canceled`.
+- **Billing webhook** → `/stripe-webhook` (subscription-manager service): send
+  `checkout.session.completed`, `customer.subscription.updated`,
+  `customer.subscription.deleted`.
 
 ## License
 
-This project is proprietary software owned by [Your Company Name]. All rights reserved. See the [LICENSE.md](LICENSE.md) file for details.
-
-## Disclaimer
-
-This bot integrates with Stripe's identity verification service. Make sure to comply with all relevant data protection and privacy laws when using this bot.
+Proprietary software owned by Esatto Technologies LLC. All rights reserved.
+See [LICENSE.md](LICENSE.md).
