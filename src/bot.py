@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
+from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 import pika
 import stripe
@@ -496,8 +497,8 @@ async def verify(interaction: discord.Interaction):
                     # Make the decrypted_dob timezone-aware (UTC)
                     decrypted_dob = decrypted_dob.replace(tzinfo=timezone.utc)
                     
-                    # Calculate the user's age
-                    user_age = (datetime.now(timezone.utc) - decrypted_dob).days // 365
+                    # Calculate the user's age in calendar years (leap-year safe)
+                    user_age = relativedelta(datetime.now(timezone.utc), decrypted_dob).years
                     
                     if user_age < server_config.minimum_age:
                         await interaction.followup.send(f"You must be at least {server_config.minimum_age} years old to be added to the role.", ephemeral=True)

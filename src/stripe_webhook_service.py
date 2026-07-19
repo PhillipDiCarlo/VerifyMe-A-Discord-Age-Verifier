@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any
 
 import pika
@@ -194,7 +194,7 @@ def handle_verification_verified(session_id: str) -> None:
         if user:
             user.verification_status = verification_status
             user.dob = encrypted_dob  # Store the encrypted DOB
-            user.last_verification_attempt = datetime.now()
+            user.last_verification_attempt = datetime.now(timezone.utc)
             logger.info(f"User {user_id} marked as verified with encrypted DOB")
         else:
             # Add new user if not found
@@ -202,7 +202,7 @@ def handle_verification_verified(session_id: str) -> None:
                 discord_id=user_id,
                 verification_status=verification_status,
                 dob=encrypted_dob,  # Store the encrypted DOB
-                last_verification_attempt=datetime.now()
+                last_verification_attempt=datetime.now(timezone.utc)
             )
             db_session.add(new_user)
             logger.info(f"New user {user_id} added with encrypted DOB")
@@ -234,14 +234,14 @@ def handle_verification_canceled(session: Dict[str, Any]) -> None:
         user = db_session.query(User).filter_by(discord_id=user_id).first()
         if user:
             user.verification_status = verification_status
-            user.last_verification_attempt = datetime.now()
+            user.last_verification_attempt = datetime.now(timezone.utc)
             logger.info(f"User {user_id} verification attempt canceled")
         else:
             # Add new user if not found
             new_user = User(
                 discord_id=user_id,
                 verification_status=verification_status,
-                last_verification_attempt=datetime.now()
+                last_verification_attempt=datetime.now(timezone.utc)
             )
             db_session.add(new_user)
             logger.info(f"New user {user_id} added with verification attempt canceled")
