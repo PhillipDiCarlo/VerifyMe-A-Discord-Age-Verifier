@@ -26,25 +26,41 @@ logging.basicConfig(
 # -------------------------------------------------------------------
 def check_subscriptions():
     """
-    Runs once a week (Sunday 23:59) as a fallback.
-    Checks servers in the Verification DB for lapses using last_renewal_date.
+    Runs once a week (Sunday 23:59) as a fallback for missed webhook /
+    gateway events. Lapse rules per payment provider:
+
+    - stripe: last_renewal_date older than 31 days (webhooks normally
+      renew it monthly).
+    - discord: entitlement_ends_at more than ENTITLEMENT_GRACE_DAYS in the
+      past (on_entitlement_update normally extends it each period). A NULL
+      entitlement_ends_at (e.g. test entitlements) never lapses here.
     """
     logging.info("[CHECKER] Starting weekly subscription check...")
 
-    # We define "lapsed" as last_renewal_date older than 31 days, for example.
     now = datetime.now(timezone.utc)
     one_month_ago = now - timedelta(days=31)
+    grace_days = int(os.getenv('ENTITLEMENT_GRACE_DAYS', '3'))
+    entitlement_cutoff = now - timedelta(days=grace_days)
 
     try:
         with session_scope() as db_session_v:
-            servers = db_session_v.query(Server).filter(
+            stripe_lapsed = db_session_v.query(Server).filter(
                 Server.subscription_status == True,
+                Server.payment_provider != 'discord',
                 Server.last_renewal_date <= one_month_ago
             ).all()
 
-            for server in servers:
+            discord_lapsed = db_session_v.query(Server).filter(
+                Server.subscription_status == True,
+                Server.payment_provider == 'discord',
+                Server.entitlement_ends_at != None,
+                Server.entitlement_ends_at <= entitlement_cutoff
+            ).all()
+
+            for server in stripe_lapsed + discord_lapsed:
                 logging.info(
-                    f"[VERIFY_DB] Marking server {server.server_id} as inactive (lapsed)."
+                    f"[VERIFY_DB] Marking server {server.server_id} as inactive "
+                    f"(lapsed, provider={server.payment_provider})."
                 )
                 server.subscription_status = False
 
