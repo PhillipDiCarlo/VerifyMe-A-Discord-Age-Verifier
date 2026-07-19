@@ -63,6 +63,35 @@ def test_get_message_unknown_key_returns_key():
 
 
 # ---------------------------------------------------------------
+# Locale completeness
+# ---------------------------------------------------------------
+
+def _format_placeholders(template: str) -> set:
+    import string
+    return {name for _, name, _, _ in string.Formatter().parse(template) if name}
+
+
+def test_all_locales_complete_and_placeholders_match():
+    """Every supported language must define exactly the en-US key set, and each
+    template must use exactly the same format placeholders as the English one
+    (a missing/mistyped placeholder would raise KeyError at send time)."""
+    from src.locales import localizations, LANGUAGE_CODES
+
+    english = localizations["en-US"]
+    assert set(localizations) == set(LANGUAGE_CODES)
+
+    for code in LANGUAGE_CODES:
+        lang = localizations[code]
+        assert set(lang.keys()) == set(english.keys()), (
+            f"{code}: missing {set(english) - set(lang)}, extra {set(lang) - set(english)}"
+        )
+        for key, template in lang.items():
+            assert _format_placeholders(template) == _format_placeholders(english[key]), (
+                f"{code}.{key}: placeholders differ from en-US"
+            )
+
+
+# ---------------------------------------------------------------
 # on_member_join auto-verify
 # ---------------------------------------------------------------
 
