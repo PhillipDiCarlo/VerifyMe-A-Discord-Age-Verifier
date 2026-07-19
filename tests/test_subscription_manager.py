@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../s
 
 import pytest
 from unittest.mock import patch, MagicMock
+import models
 import src.subscription_manager as subscription_manager
 from src.subscription_manager import (
     Server,
@@ -36,7 +37,7 @@ def test_stripe_webhook(mock_external_systems):
 @pytest.fixture(scope="function")
 def verification_db():
     """Provide a clean verification DB session per test."""
-    session = subscription_manager.SessionVerification()
+    session = models.Session()
     session.query(Server).delete()
     session.commit()
     yield session

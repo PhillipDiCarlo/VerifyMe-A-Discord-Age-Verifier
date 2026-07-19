@@ -2,13 +2,14 @@ import os
 import stripe
 import threading
 from flask import Flask, request, jsonify
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
-from contextlib import contextmanager
 import logging
 from datetime import datetime, timezone
+
+try:
+    from .models import Server, session_scope
+except ImportError:
+    from models import Server, session_scope
 
 # Load environment variables
 load_dotenv()
@@ -18,50 +19,6 @@ app = Flask(__name__)
 # Stripe configuration
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 endpoint_secret = os.getenv('STRIPE_PAYMENT_WEBHOOK_SECRET')
-
-# This service is scoped to the VerifyMe verification database ONLY. It must
-# never construct a connection to any other database (DJ, VRCVerify, etc.) --
-# those products no longer bill through Stripe/this repo.
-DATABASE_URL_VERIFICATION = os.getenv('DATABASE_URL_VERIFICATION')
-engine_verification = create_engine(DATABASE_URL_VERIFICATION)
-
-BaseVerification = declarative_base()
-SessionVerification = sessionmaker(bind=engine_verification)
-
-# ------------------------
-#  VERIFICATION SERVICE
-# ------------------------
-class Server(BaseVerification):
-    __tablename__ = 'servers'
-    id = Column(Integer, primary_key=True)
-    server_id = Column(String(30), nullable=False, unique=True)
-    owner_id = Column(String(30), nullable=False)
-    tier = Column(String(50), nullable=True)
-    subscription_status = Column(Boolean, default=False)
-    verifications_count = Column(Integer, default=0)
-    subscription_start_date = Column(DateTime(timezone=True), nullable=True)
-    stripe_subscription_id = Column(String(255), nullable=True)
-    role_id = Column(String(30), nullable=True)
-    email = Column(String(255), nullable=True)
-    last_renewal_date = Column(DateTime(timezone=True), nullable=True)
-
-
-# Create tables (or run migrations in production!)
-BaseVerification.metadata.create_all(engine_verification)
-
-@contextmanager
-def session_scope():
-    session = SessionVerification()
-    try:
-        yield session
-        session.commit()
-        logging.info("Transaction committed.")
-    except Exception as e:
-        session.rollback()
-        logging.error(f"Error during session scope: {e}")
-        raise
-    finally:
-        session.close()
 
 # Logging setup
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
