@@ -1,0 +1,36 @@
+name: Tests
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: config/other_configs/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r config/other_configs/requirements-dev.txt
+
+      # tests/conftest.py forces sqlite in-memory DBs and supplies inert
+      # values for every required env var, so no secrets are needed here.
+      - name: Run test suite
+        run: pytest tests/
+
+      - name: Verify migrations apply from zero with no model drift
+        env:
+          DATABASE_URL_VERIFICATION: sqlite:///ci_migration_check.db
+        run: |
+          alembic upgrade head
+          alembic check
