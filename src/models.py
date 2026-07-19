@@ -77,6 +77,11 @@ class Server(Base):
     last_renewal_date = Column(DateTime(timezone=True), nullable=True)
     instructions_channel_id = Column(String(30), nullable=True)
     instructions_message_id = Column(String(30), nullable=True)
+    # Phase 3 settings
+    instructions_locale = Column(String(10), nullable=False, default='en-US', server_default='en-US')
+    custom_verification_message = Column(String(1000), nullable=True)  # DM sent on success; sanitized
+    unverified_role_id = Column(String(30), nullable=True)  # optional role removed on success
+    auto_verify_new_members = Column(Boolean, nullable=False, default=True, server_default='true')
 
 
 class CommandUsage(Base):
