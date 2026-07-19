@@ -34,12 +34,20 @@ os.environ.setdefault("RABBITMQ_HOST", "invalid.test.local")
 from cryptography.fernet import Fernet  # noqa: E402
 os.environ["DOB_KEY"] = Fernet.generate_key().decode()
 
-# bot.py hard-requires these at import; give inert values so the test suite
-# runs on machines/CI without a populated .env.
+# The services hard-require these at import (bot.py's required_env_vars
+# check, stripe_webhook_service's STRIPE_WEBHOOK_SECRET guard and
+# int(RABBITMQ_PORT) cast); give inert values so the test suite runs on
+# machines/CI without a populated .env.
 os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token")
 os.environ.setdefault("STRIPE_SECRET_KEY", "sk_test_dummy")
+os.environ.setdefault("STRIPE_RESTRICTED_SECRET_KEY", "rk_test_dummy")
+os.environ.setdefault("STRIPE_WEBHOOK_SECRET", "whsec_test_dummy")
+os.environ.setdefault("STRIPE_PAYMENT_WEBHOOK_SECRET", "whsec_test_dummy")
+os.environ.setdefault("RABBITMQ_PORT", "5672")
 os.environ.setdefault("RABBITMQ_USERNAME", "test")
 os.environ.setdefault("RABBITMQ_PASSWORD", "test")
+os.environ.setdefault("RABBITMQ_VHOST", "/")
+os.environ.setdefault("RABBITMQ_QUEUE_NAME", "test_queue")
 
 # Make both import styles used across test files work regardless of how
 # pytest is invoked: "import models" needs src/ on the path, and
