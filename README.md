@@ -132,5 +132,6 @@ upgrade-from-zero/drift check on every PR.
 
 ## License
 
-Proprietary software owned by Esatto Technologies LLC. All rights reserved.
-See [LICENSE.md](LICENSE.md).
+Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md). You're free to fork,
+modify, and redistribute this code for noncommercial purposes; any commercial use requires
+permission from Esatto Technologies LLC (contact@esattotech.com).
