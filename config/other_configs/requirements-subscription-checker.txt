@@ -1,5 +1,5 @@
 # subscription-checker service (src/subscription_checker.py)
-APScheduler==3.10.4
-python-dotenv==1.0.1
-SQLAlchemy==2.0.31
-psycopg2-binary==2.9.9
+APScheduler==3.11.3
+python-dotenv==1.2.2
+SQLAlchemy==2.0.51
+psycopg2-binary==2.9.12
