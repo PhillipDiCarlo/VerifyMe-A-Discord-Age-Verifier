@@ -21,7 +21,9 @@ if config.config_file_name is not None:
 database_url = os.getenv("DATABASE_URL_VERIFICATION")
 if not database_url:
     raise EnvironmentError("DATABASE_URL_VERIFICATION must be set to run migrations")
-config.set_main_option("sqlalchemy.url", database_url)
+# configparser treats % as interpolation syntax, so a URL containing
+# percent-encoded characters (e.g. in the password) must escape them.
+config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 from models import Base  # noqa: E402
 
