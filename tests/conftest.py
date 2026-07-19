@@ -41,9 +41,15 @@ os.environ.setdefault("STRIPE_SECRET_KEY", "sk_test_dummy")
 os.environ.setdefault("RABBITMQ_USERNAME", "test")
 os.environ.setdefault("RABBITMQ_PASSWORD", "test")
 
+# Make both import styles used across test files work regardless of how
+# pytest is invoked: "import models" needs src/ on the path, and
+# "import src.bot" needs the repo root. (`python -m pytest` adds the CWD
+# to sys.path but a bare `pytest` — e.g. in CI — does not.)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
+
 # Services no longer run create_all at import (schema is managed by Alembic
 # in real deployments), so create the tables on the shared test engine here.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 import models  # noqa: E402  (must come after the env override above)
 
 # Test modules import services both as plain modules ("import subscription_checker")
