@@ -28,6 +28,19 @@ os.environ["DATABASE_URL_VERIFICATION"] = "sqlite:///:memory:"
 # the door on a future test doing so by accident.
 os.environ.setdefault("RABBITMQ_HOST", "invalid.test.local")
 
+# Deterministic Fernet key so DOB encrypt/decrypt round-trips in tests work
+# regardless of (and without needing) the developer's real .env. Set before
+# any src import — load_dotenv() does not override existing env vars.
+from cryptography.fernet import Fernet  # noqa: E402
+os.environ["DOB_KEY"] = Fernet.generate_key().decode()
+
+# bot.py hard-requires these at import; give inert values so the test suite
+# runs on machines/CI without a populated .env.
+os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token")
+os.environ.setdefault("STRIPE_SECRET_KEY", "sk_test_dummy")
+os.environ.setdefault("RABBITMQ_USERNAME", "test")
+os.environ.setdefault("RABBITMQ_PASSWORD", "test")
+
 # Services no longer run create_all at import (schema is managed by Alembic
 # in real deployments), so create the tables on the shared test engine here.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
