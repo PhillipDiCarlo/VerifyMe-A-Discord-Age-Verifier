@@ -999,5 +999,301 @@ async def instructions(interaction: discord.Interaction):
         # Respond to the admin
         await interaction.response.send_message(get_message("instructions_posted", interaction, loc), ephemeral=True)
 
+# -------------------------------------------------------------------
+# /settings — paged admin settings view (pattern ported from VRCVerify)
+# -------------------------------------------------------------------
+class MinimumAgeModal(discord.ui.Modal, title="Set minimum age"):
+    """Modal for the minimum-age page. Persists immediately on submit."""
+    age_input = discord.ui.TextInput(label="Minimum age (13-99)", max_length=2, required=True)
+
+    def __init__(self, parent_view: "PagedSettingsView"):
+        super().__init__()
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.age_input.value).strip()
+        if not raw.isdigit() or not (13 <= int(raw) <= 99):
+            await interaction.response.send_message(get_message("min_age_invalid", interaction), ephemeral=True)
+            return
+        age = int(raw)
+        with session_scope() as session:
+            srv = _get_or_create_server(session, interaction)
+            srv.minimum_age = age
+        self.parent_view.minimum_age = age
+        await interaction.response.send_message(
+            get_message("min_age_saved", interaction, minimum_age=age), ephemeral=True
+        )
+
+
+class CustomMessageModal(discord.ui.Modal, title="Custom success message"):
+    """Modal for the custom success DM. Sanitized and persisted on submit."""
+    message_input = discord.ui.TextInput(
+        label="Message (blank lines allowed)",
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
+        required=True,
+    )
+
+    def __init__(self, parent_view: "PagedSettingsView"):
+        super().__init__()
+        self.parent_view = parent_view
+        if parent_view.custom_message:
+            self.message_input.default = parent_view.custom_message
+
+    async def on_submit(self, interaction: discord.Interaction):
+        sanitized, invalid_urls = sanitize_custom_message(str(self.message_input.value))
+        if invalid_urls:
+            await interaction.response.send_message(
+                get_message("custom_msg_invalid_links", interaction,
+                            invalid_list="\n".join(invalid_urls)),
+                ephemeral=True,
+            )
+            return
+        if len(sanitized) > 1000:
+            await interaction.response.send_message(get_message("custom_msg_too_long", interaction), ephemeral=True)
+            return
+        with session_scope() as session:
+            srv = _get_or_create_server(session, interaction)
+            srv.custom_verification_message = sanitized
+        self.parent_view.custom_message = sanitized
+        await interaction.response.send_message(get_message("custom_msg_saved", interaction), ephemeral=True)
+
+
+def _get_or_create_server(session, interaction: discord.Interaction) -> Server:
+    srv = session.query(Server).filter_by(server_id=str(interaction.guild.id)).first()
+    if not srv:
+        srv = Server(
+            server_id=str(interaction.guild.id),
+            owner_id=str(interaction.guild.owner_id),
+            tier="tier_0",
+            subscription_status=False,
+            minimum_age=18,
+        )
+        session.add(srv)
+    return srv
+
+
+class PagedSettingsView(discord.ui.View):
+    """One setting per page with Back/Next navigation and a Save button.
+
+    Select-based settings (language, auto-verify, unverified role) persist on
+    Save; modal-based ones (minimum age, custom message) persist on submit.
+    """
+    PAGES = 5  # 0: min age, 1: language, 2: auto-verify, 3: custom msg, 4: unverified role
+
+    def __init__(self, *, minimum_age: int, instr_locale: str, auto_verify: bool,
+                 custom_message: Optional[str], unverified_role_id: Optional[str],
+                 page_index: int = 0):
+        super().__init__(timeout=None)
+        self.minimum_age = minimum_age
+        self.instr_locale = instr_locale
+        self.auto_verify = auto_verify
+        self.custom_message = custom_message
+        self.unverified_role_id = unverified_role_id
+        self.page = page_index
+        self._add_controls_for_page()
+
+    # ----- Rendering -----
+    def _page_title_and_desc(self, ctx) -> tuple[str, str, str]:
+        not_set = get_message("settings_not_set", ctx)
+        if self.page == 0:
+            title = get_message("settings_page_min_age_title", ctx)
+            desc = get_message("settings_page_min_age_desc", ctx)
+            current = str(self.minimum_age)
+        elif self.page == 1:
+            title = get_message("settings_page_locale_title", ctx)
+            desc = get_message("settings_page_locale_desc", ctx)
+            current = self.instr_locale
+        elif self.page == 2:
+            title = get_message("settings_page_auto_verify_title", ctx)
+            desc = get_message("settings_page_auto_verify_desc", ctx)
+            current = get_message("yes" if self.auto_verify else "no", ctx)
+        elif self.page == 3:
+            title = get_message("settings_page_custom_msg_title", ctx)
+            desc = get_message("settings_page_custom_msg_desc", ctx)
+            current = (self.custom_message[:100] + "…") if self.custom_message and len(self.custom_message) > 100 \
+                else (self.custom_message or not_set)
+        else:
+            title = get_message("settings_page_unverified_title", ctx)
+            desc = get_message("settings_page_unverified_desc", ctx)
+            current = f"<@&{self.unverified_role_id}>" if self.unverified_role_id else not_set
+        return title, desc, current
+
+    def render_content(self) -> str:
+        ctx = SimpleNamespace(locale=self.instr_locale if self.instr_locale in LANGUAGE_CODES else "en-US")
+        title, desc, current = self._page_title_and_desc(ctx)
+        return (
+            f"{get_message('settings_header', ctx)}\n\n"
+            f"{title}\n{desc}\n"
+            f"{get_message('settings_current', ctx, value=current)}"
+        )
+
+    def _rebuild(self, interaction: discord.Interaction, page_index: int) -> "PagedSettingsView":
+        return PagedSettingsView(
+            minimum_age=self.minimum_age,
+            instr_locale=self.instr_locale,
+            auto_verify=self.auto_verify,
+            custom_message=self.custom_message,
+            unverified_role_id=self.unverified_role_id,
+            page_index=page_index,
+        )
+
+    # ----- Controls -----
+    def _add_controls_for_page(self):
+        ctx = SimpleNamespace(locale=self.instr_locale if self.instr_locale in LANGUAGE_CODES else "en-US")
+
+        if self.page == 0:
+            change_btn = discord.ui.Button(
+                label=get_message("settings_btn_change_age", ctx),
+                style=discord.ButtonStyle.secondary,
+            )
+
+            async def on_change_age(interaction: discord.Interaction):
+                await interaction.response.send_modal(MinimumAgeModal(self))
+
+            change_btn.callback = on_change_age
+            self.add_item(change_btn)
+
+        elif self.page == 1:
+            locale_options = [
+                discord.SelectOption(label=code, value=code, default=(code == self.instr_locale))
+                for code in LANGUAGE_CODES
+            ]
+            locale_dropdown = discord.ui.Select(
+                placeholder=get_message("settings_choose_language", ctx),
+                min_values=1, max_values=1, options=locale_options,
+            )
+
+            async def on_locale_select(interaction: discord.Interaction):
+                self.instr_locale = interaction.data["values"][0]
+                await interaction.response.defer(ephemeral=True)
+
+            locale_dropdown.callback = on_locale_select
+            self.add_item(locale_dropdown)
+
+        elif self.page == 2:
+            av_options = [
+                discord.SelectOption(label=get_message("yes", ctx), value="yes", default=self.auto_verify),
+                discord.SelectOption(label=get_message("no", ctx), value="no", default=not self.auto_verify),
+            ]
+            av_dropdown = discord.ui.Select(
+                placeholder=get_message("settings_choose_yes_no", ctx),
+                min_values=1, max_values=1, options=av_options,
+            )
+
+            async def on_auto_verify_select(interaction: discord.Interaction):
+                self.auto_verify = (interaction.data["values"][0] == "yes")
+                await interaction.response.defer(ephemeral=True)
+
+            av_dropdown.callback = on_auto_verify_select
+            self.add_item(av_dropdown)
+
+        elif self.page == 3:
+            edit_btn = discord.ui.Button(
+                label=get_message("settings_btn_edit_message", ctx),
+                style=discord.ButtonStyle.secondary,
+            )
+            clear_btn = discord.ui.Button(
+                label=get_message("settings_btn_clear_message", ctx),
+                style=discord.ButtonStyle.danger,
+                disabled=self.custom_message is None,
+            )
+
+            async def on_edit_message(interaction: discord.Interaction):
+                await interaction.response.send_modal(CustomMessageModal(self))
+
+            async def on_clear_message(interaction: discord.Interaction):
+                with session_scope() as session:
+                    srv = _get_or_create_server(session, interaction)
+                    srv.custom_verification_message = None
+                self.custom_message = None
+                new_view = self._rebuild(interaction, self.page)
+                await interaction.response.edit_message(content=new_view.render_content(), view=new_view)
+
+            edit_btn.callback = on_edit_message
+            clear_btn.callback = on_clear_message
+            self.add_item(edit_btn)
+            self.add_item(clear_btn)
+
+        else:
+            role_select = discord.ui.RoleSelect(
+                placeholder=get_message("settings_choose_role", ctx),
+                min_values=0, max_values=1,
+            )
+            clear_role_btn = discord.ui.Button(
+                label=get_message("settings_btn_clear_role", ctx),
+                style=discord.ButtonStyle.danger,
+                disabled=self.unverified_role_id is None,
+            )
+
+            async def on_role_select(interaction: discord.Interaction):
+                values = interaction.data.get("values") or []
+                if values:
+                    self.unverified_role_id = str(values[0])
+                await interaction.response.defer(ephemeral=True)
+
+            async def on_clear_role(interaction: discord.Interaction):
+                self.unverified_role_id = None
+                new_view = self._rebuild(interaction, self.page)
+                await interaction.response.edit_message(content=new_view.render_content(), view=new_view)
+
+            role_select.callback = on_role_select
+            clear_role_btn.callback = on_clear_role
+            self.add_item(role_select)
+            self.add_item(clear_role_btn)
+
+        # Nav + save (labels intentionally unlocalized, matching VRCVerify)
+        back_btn = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary, disabled=(self.page == 0))
+        next_btn = discord.ui.Button(label="Next", style=discord.ButtonStyle.secondary, disabled=(self.page == self.PAGES - 1))
+        save_btn = discord.ui.Button(label="Save", style=discord.ButtonStyle.primary)
+
+        async def on_back(interaction: discord.Interaction):
+            new_view = self._rebuild(interaction, self.page - 1)
+            await interaction.response.edit_message(content=new_view.render_content(), view=new_view)
+
+        async def on_next(interaction: discord.Interaction):
+            new_view = self._rebuild(interaction, self.page + 1)
+            await interaction.response.edit_message(content=new_view.render_content(), view=new_view)
+
+        async def on_save(interaction: discord.Interaction):
+            with session_scope() as session:
+                srv = _get_or_create_server(session, interaction)
+                srv.instructions_locale = str(self.instr_locale)
+                srv.auto_verify_new_members = bool(self.auto_verify)
+                srv.unverified_role_id = self.unverified_role_id
+            ctx2 = SimpleNamespace(locale=self.instr_locale if self.instr_locale in LANGUAGE_CODES else "en-US")
+            await interaction.response.edit_message(content=get_message("settings_saved", ctx2), view=None)
+
+        back_btn.callback = on_back
+        next_btn.callback = on_next
+        save_btn.callback = on_save
+        self.add_item(back_btn)
+        self.add_item(next_btn)
+        self.add_item(save_btn)
+
+
+@bot.tree.command(name="settings", description="Admin: Configure VerifyMe settings")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(administrator=True)
+async def settings(interaction: discord.Interaction):
+    with session_scope() as session:
+        srv = session.query(Server).filter_by(server_id=str(interaction.guild.id)).first()
+        minimum_age = srv.minimum_age if srv and srv.minimum_age else 18
+        instr_locale = (srv.instructions_locale
+                        if srv and srv.instructions_locale in LANGUAGE_CODES else "en-US")
+        auto_verify = bool(srv.auto_verify_new_members) if srv and srv.auto_verify_new_members is not None else True
+        custom_message = srv.custom_verification_message if srv else None
+        unverified_role_id = srv.unverified_role_id if srv else None
+
+    view = PagedSettingsView(
+        minimum_age=minimum_age,
+        instr_locale=instr_locale,
+        auto_verify=auto_verify,
+        custom_message=custom_message,
+        unverified_role_id=unverified_role_id,
+    )
+    await interaction.response.send_message(content=view.render_content(), view=view, ephemeral=True)
+
+
 if __name__ == '__main__':
     bot.run(DISCORD_BOT_TOKEN)
