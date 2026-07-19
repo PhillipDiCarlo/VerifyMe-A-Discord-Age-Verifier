@@ -139,4 +139,3 @@ For permission requests regarding commercial use, please contact:
 Esatto Technologies LLC
 <https://www.esattotech.com>
 contact@esattotech.com
-+1 (609) 616-0263
