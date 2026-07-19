@@ -1,5 +1,6 @@
 services:
   discord-bot:
+    image: verifyme-discord-bot
     build:
       context: ../../
       dockerfile: docker/Dockerfile-bot
@@ -32,6 +33,7 @@ services:
     restart: unless-stopped
 
   stripe-webhook:
+    image: verifyme-stripe-webhook
     build:
       context: ../../
       dockerfile: docker/Dockerfile-stripe-webhook
@@ -61,6 +63,7 @@ services:
     restart: unless-stopped
 
   subscription-manager:
+    image: verifyme-subscription-manager
     build:
       context: ../../
       dockerfile: docker/Dockerfile-subscription-manager
@@ -76,6 +79,7 @@ services:
     restart: unless-stopped
 
   subscription-checker:
+    image: verifyme-subscription-checker
     build:
       context: ../../
       dockerfile: docker/Dockerfile-subscription-checker
