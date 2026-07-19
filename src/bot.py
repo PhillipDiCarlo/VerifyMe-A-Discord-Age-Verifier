@@ -511,21 +511,31 @@ async def verify(interaction: discord.Interaction):
 
             # Check cooldown if user exists and is not verified
             if user and user.last_verification_attempt:
-                logger.debug(f"User last verification attempt (UTC): {user.last_verification_attempt}")
+                last_attempt = user.last_verification_attempt
+                if last_attempt.tzinfo is None:
+                    # sqlite returns naive datetimes even for tz-aware columns
+                    last_attempt = last_attempt.replace(tzinfo=timezone.utc)
 
                 current_time_utc = datetime.now(timezone.utc)
-                logger.debug(f"Current time (UTC): {current_time_utc}")
+                cooldown_end = last_attempt + timedelta(seconds=COOLDOWN_PERIOD)
 
-                if current_time_utc - user.last_verification_attempt < timedelta(seconds=COOLDOWN_PERIOD):
-                    cooldown_end = user.last_verification_attempt + timedelta(seconds=COOLDOWN_PERIOD)
+                if current_time_utc < cooldown_end:
+                    remaining = int((cooldown_end - current_time_utc).total_seconds()) + 1
                     logger.debug(f"User {interaction.user.id} is in cooldown period until: {cooldown_end}")
-                    await interaction.followup.send(f"You're in a cooldown period. Please wait before attempting to verify again.", ephemeral=True)
+                    await interaction.followup.send(
+                        f"You're in a cooldown period. Please wait {remaining} seconds before attempting to verify again.",
+                        ephemeral=True,
+                    )
                     return
 
             # Check if there are available verifications for the server
             if server_config.verifications_count <= 0:
                 await interaction.followup.send("This server has reached its monthly verification limit. Please contact an admin to upgrade the plan or wait until next month.", ephemeral=True)
                 return
+
+            # Record the attempt BEFORE generating the Stripe URL, so a rapid
+            # double-click can't create two verification sessions.
+            await track_verification_attempt(user_id)
 
             # Directly generate a Stripe verification URL and send it (no second button)
             logger.debug(f"Generating Stripe verification URL for user {interaction.user.id}")
@@ -537,8 +547,6 @@ async def verify(interaction: discord.Interaction):
                 await interaction.followup.send("Failed to initiate the verification process. Please try again later or contact support.", ephemeral=True)
                 return
 
-            # Track verification attempt and usage
-            await track_verification_attempt(user_id)
             bot.loop.create_task(track_command_usage(guild_id, interaction.user.id, "verify"))
 
             await interaction.followup.send(
