@@ -82,6 +82,12 @@ class Server(Base):
     custom_verification_message = Column(String(1000), nullable=True)  # DM sent on success; sanitized
     unverified_role_id = Column(String(30), nullable=True)  # optional role removed on success
     auto_verify_new_members = Column(Boolean, nullable=False, default=True, server_default='true')
+    # Phase 5: Discord-native monetization. Stripe columns above stay
+    # untouched for grandfathered subscribers.
+    payment_provider = Column(String(10), nullable=False, default='stripe', server_default='stripe')
+    discord_sku_id = Column(String(30), nullable=True)
+    discord_entitlement_id = Column(String(30), nullable=True)
+    entitlement_ends_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class CommandUsage(Base):
