@@ -94,8 +94,12 @@ missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 if missing_vars:
     raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
-# Initialize the Discord bot with intents (avoid heavy member chunking at startup)
+# Initialize the Discord bot with intents. The privileged Server Members
+# intent is required for on_member_join (auto-verify returning users on
+# join, decided 2026-07-18); guild chunking at startup stays disabled and
+# member lookups still go through the REST cache below.
 intents = discord.Intents.default()
+intents.members = True
 
 # TTL cache and concurrency limit for REST member fetches (no Members intent needed)
 REST_TTL_SECONDS = int(os.getenv('REST_TTL_SECONDS', '180'))
@@ -563,6 +567,74 @@ class InstructionsPersistentView(discord.ui.View):
     async def verify_me(self, interaction: discord.Interaction, button: discord.ui.Button):
         await verify(interaction)
 
+async def refresh_instruction_panels():
+    """Re-edit every stored instruction panel so embeds/buttons reflect the
+    current code and locale; clear references that 404 (deleted message or
+    channel) so we stop retrying them forever."""
+    try:
+        with session_scope() as session:
+            servers_with_panels = (
+                session.query(Server)
+                .filter(
+                    Server.instructions_channel_id.isnot(None),
+                    Server.instructions_message_id.isnot(None)
+                )
+                .all()
+            )
+            panels = [
+                {
+                    "server_id": s.server_id,
+                    "channel_id": s.instructions_channel_id,
+                    "message_id": s.instructions_message_id,
+                    "locale": s.instructions_locale,
+                }
+                for s in servers_with_panels
+            ]
+    except Exception:
+        logger.warning("Unable to enumerate servers for instruction panel refresh.", exc_info=True)
+        return
+
+    for entry in panels:
+        try:
+            channel = bot.get_channel(int(entry["channel_id"]))
+            if channel is None:
+                channel = await bot.fetch_channel(int(entry["channel_id"]))
+            message = await channel.fetch_message(int(entry["message_id"]))
+            await message.edit(embed=build_instructions_embed(entry["locale"]),
+                               view=InstructionsPersistentView())
+            logger.info(f"Reinitializing instruction panel for guild ID: {entry['server_id']}")
+        except (discord.NotFound, discord.Forbidden) as e:
+            # Message or channel is gone (or unreadable): clear the stale reference
+            logger.info(f"Clearing stale instruction panel reference for guild {entry['server_id']}: {e}")
+            try:
+                with session_scope() as session:
+                    srv = session.query(Server).filter_by(server_id=entry["server_id"]).first()
+                    if srv:
+                        srv.instructions_channel_id = None
+                        srv.instructions_message_id = None
+            except Exception:
+                logger.warning(f"Could not clear stale panel reference for guild {entry['server_id']}.", exc_info=True)
+        except Exception as e:
+            logger.error(f"Error refreshing instruction panel for guild {entry['server_id']}: {e}")
+
+
+async def watch_update_trigger_file(trigger_path: str, poll_seconds: int):
+    """Refresh all instruction panels when the trigger file appears.
+
+    Lets an operator push updated panel embeds at runtime without a restart:
+    `touch <trigger_path>` inside the container.
+    """
+    while True:
+        try:
+            if os.path.exists(trigger_path):
+                os.remove(trigger_path)
+                logger.info("Instruction panel update trigger detected; refreshing panels...")
+                await refresh_instruction_panels()
+        except Exception:
+            logger.warning("Trigger-file watcher iteration failed.", exc_info=True)
+        await asyncio.sleep(poll_seconds)
+
+
 @bot.event
 async def on_ready():
     bot.last_startup_time = datetime.now(timezone.utc)
@@ -571,23 +643,13 @@ async def on_ready():
     if not bot.background_tasks_started:
         bot.background_tasks_started = True
         bot.loop.create_task(consume_queue())
+        bot.loop.create_task(refresh_instruction_panels())
 
-        # Log reinitialization for any guilds that have stored instruction panel IDs
-        try:
-            with session_scope() as session:
-                servers_with_panels = (
-                    session.query(Server)
-                    .filter(
-                        Server.instructions_channel_id.isnot(None),
-                        Server.instructions_message_id.isnot(None)
-                    )
-                    .all()
-                )
-                for s in servers_with_panels:
-                    # Requested log format
-                    logger.info(f"Reinitializing instruction panel for guild ID: {s.server_id}")
-        except Exception as e:
-            logger.debug(f"Unable to enumerate servers for instruction panel reinitialization logs: {e}")
+        # Optional runtime panel refresh: touch the trigger file to re-edit
+        # all panels without restarting the bot.
+        trigger_path = os.getenv("INSTRUCTIONS_TRIGGER_PATH", "/tmp/update_instructions.trigger")
+        poll = int(os.getenv("INSTRUCTIONS_TRIGGER_POLL", "5"))
+        bot.loop.create_task(watch_update_trigger_file(trigger_path, poll))
 
     # # Set the bot's bio/status
     # bio_message = "Use `/get_verify_bot` to add this bot to your discord."
@@ -715,6 +777,47 @@ async def verify(interaction: discord.Interaction):
 async def verify_command(interaction: discord.Interaction):
     """Slash command wrapper that calls the plain verify() function."""
     await verify(interaction)
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    """Auto-assign the verified role to already-verified users when they join,
+    if the server enables it and the user meets the server's minimum age.
+
+    Requires the privileged Server Members intent. Never consumes a
+    verification token — only users verified through Stripe Identity in the
+    past qualify, same as the click-to-reverify path.
+    """
+    try:
+        guild_id = str(member.guild.id)
+        discord_id = str(member.id)
+
+        with session_scope() as session:
+            server = session.query(Server).filter_by(server_id=guild_id).first()
+            if not server or not server.role_id or not server.subscription_status:
+                return
+            if not server.auto_verify_new_members:
+                return
+
+            user = session.query(User).filter_by(discord_id=discord_id).first()
+            if not user or not user.verification_status:
+                return
+
+            # Same age gate as the manual verify path
+            if user.dob:
+                decrypted_dob = decrypt_dob(user.dob).replace(tzinfo=timezone.utc)
+                user_age = relativedelta(datetime.now(timezone.utc), decrypted_dob).years
+                if user_age < server.minimum_age:
+                    return
+
+            role_id = server.role_id
+
+        assigned = await assign_role(guild_id, discord_id, role_id,
+                                     notify_success_dm=True, success_dm_key="dm_auto_verified")
+        if assigned:
+            logger.info(f"Auto-verified user {discord_id} in guild {guild_id} on join.")
+    except Exception:
+        logger.error("Exception in on_member_join", exc_info=True)
 
 async def track_verification_attempt(discord_id):
     logger.debug(f"Tracking verification attempt for user {discord_id}")
