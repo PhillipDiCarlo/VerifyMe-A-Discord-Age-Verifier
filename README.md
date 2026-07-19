@@ -61,9 +61,27 @@ Copy `.env.example` to `.env` and fill it in. Required:
   `RABBITMQ_PASSWORD` / `RABBITMQ_VHOST` / `RABBITMQ_QUEUE_NAME`
 - `DOB_KEY` — Fernet key for DOB encryption
 
-Optional tuning knobs (RabbitMQ heartbeats/retries, REST member-fetch cache,
-instruction-panel refresh trigger, log levels) are documented inline in
-`.env.example`. Never set `ALLOW_UNSIGNED_WEBHOOKS` outside local testing.
+For Discord-storefront purchases, set the `DISCORD_SKU_TIER_*` /
+`DISCORD_SKU_TOKENS_*` SKU IDs from the Developer Portal (Monetization →
+Manage SKUs); with none set, `/get_subscription` falls back to the legacy
+website link. Optional tuning knobs (RabbitMQ heartbeats/retries, REST
+member-fetch cache, instruction-panel refresh trigger, purchase-context TTL,
+entitlement grace days, log levels) are documented inline in `.env.example`.
+Never set `ALLOW_UNSIGNED_WEBHOOKS` outside local testing.
+
+## Payments
+
+Two rails coexist (`servers.payment_provider`):
+
+- **discord** — new purchases. Guild-subscription SKUs (tiers) and consumable
+  token packs bought in-client via premium buttons; entitlements arrive over
+  the gateway (`on_entitlement_*`) with a startup reconciliation sweep and a
+  weekly `entitlement_ends_at` lapse fallback in subscription-checker.
+- **stripe** — grandfathered subscribers. Billing webhooks, tier logic, and
+  the 31-day lapse fallback keep working unchanged.
+
+Both rails share `billing.apply_tier()`: on each renewal the monthly
+allowance resets to the tier amount (no rollover); token packs are additive.
 
 ## Running
 

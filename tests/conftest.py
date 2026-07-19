@@ -67,6 +67,11 @@ import models  # noqa: E402  (must come after the env override above)
 # so every service — however imported — shares the same test database.
 sys.modules.setdefault("src.models", models)
 
+# Same dual-identity pinning for the shared billing module, so patching
+# billing.SKU_ID_TO_* in a test also affects what src.bot sees.
+import billing  # noqa: E402
+sys.modules.setdefault("src.billing", billing)
+
 models.init_db()
 
 

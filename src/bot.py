@@ -20,9 +20,11 @@ from cryptography.fernet import Fernet
 try:
     from .models import User, Server, CommandUsage, session_scope
     from .locales import localizations, LANGUAGE_CODES
+    from . import billing
 except ImportError:
     from models import User, Server, CommandUsage, session_scope
     from locales import localizations, LANGUAGE_CODES
+    import billing
 
 
 # --- Localization helpers (pattern ported from VRCVerify) ---
@@ -644,6 +646,7 @@ async def on_ready():
         bot.background_tasks_started = True
         bot.loop.create_task(consume_queue())
         bot.loop.create_task(refresh_instruction_panels())
+        bot.loop.create_task(reconcile_entitlements())
 
         # Optional runtime panel refresh: touch the trigger file to re-edit
         # all panels without restarting the bot.
@@ -741,7 +744,16 @@ async def verify(interaction: discord.Interaction):
 
             # Check if there are available verifications for the server
             if server_config.verifications_count <= 0:
-                await interaction.followup.send(get_message("verification_limit_reached", interaction, loc), ephemeral=True)
+                # Offer in-client token-pack purchases when SKUs are configured
+                packs_view = build_purchase_view(include_subscriptions=False, include_packs=True)
+                if packs_view:
+                    _record_purchase_context(interaction.user.id, guild_id)
+                    await interaction.followup.send(
+                        get_message("verification_limit_reached", interaction, loc),
+                        view=packs_view, ephemeral=True,
+                    )
+                else:
+                    await interaction.followup.send(get_message("verification_limit_reached", interaction, loc), ephemeral=True)
                 return
 
             # Record the attempt BEFORE generating the Stripe URL, so a rapid
@@ -818,6 +830,204 @@ async def on_member_join(member: discord.Member):
             logger.info(f"Auto-verified user {discord_id} in guild {guild_id} on join.")
     except Exception:
         logger.error("Exception in on_member_join", exc_info=True)
+
+
+# -------------------------------------------------------------------
+# Discord-native monetization (Phase 5): entitlement handling
+# -------------------------------------------------------------------
+# Consumable (token pack) entitlements are user-scoped, not guild-scoped, so
+# we remember which guild a user last opened a purchase surface in and
+# attribute their pack there. Falls back to "user owns exactly one subscribed
+# server" if the bot restarted in between.
+_PURCHASE_CONTEXT_TTL = int(os.getenv('PURCHASE_CONTEXT_TTL_SECONDS', '3600'))
+_purchase_context: dict = {}  # user_id (str) -> (guild_id (str), monotonic deadline)
+
+
+def _record_purchase_context(user_id, guild_id):
+    _purchase_context[str(user_id)] = (str(guild_id), time.monotonic() + _PURCHASE_CONTEXT_TTL)
+
+
+def _get_purchase_context(user_id):
+    entry = _purchase_context.get(str(user_id))
+    if not entry:
+        return None
+    guild_id, deadline = entry
+    if time.monotonic() > deadline:
+        _purchase_context.pop(str(user_id), None)
+        return None
+    return guild_id
+
+
+def build_purchase_view(include_subscriptions: bool = True, include_packs: bool = True):
+    """View of Discord premium (SKU) buttons; None if no SKUs are configured."""
+    sku_ids = []
+    if include_subscriptions:
+        sku_ids.extend(billing.SKU_ID_TO_TIER.keys())
+    if include_packs:
+        sku_ids.extend(billing.SKU_ID_TO_EXTRA_TOKENS.keys())
+    if not sku_ids:
+        return None
+    view = discord.ui.View(timeout=None)
+    for sku_id in sku_ids:
+        view.add_item(discord.ui.Button(style=discord.ButtonStyle.premium, sku_id=int(sku_id)))
+    return view
+
+
+def _aware(dt):
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _resolve_pack_guild(session, user_id: str):
+    """Which server should a user-scoped token pack credit? Purchase context
+    first, then sole-owner fallback."""
+    guild_id = _get_purchase_context(user_id)
+    if guild_id:
+        return guild_id
+    owned = session.query(Server).filter_by(owner_id=str(user_id), subscription_status=True).all()
+    if len(owned) == 1:
+        return owned[0].server_id
+    return None
+
+
+async def process_entitlement(entitlement) -> None:
+    """Apply one entitlement (from a gateway event or the startup sweep).
+    Idempotent: re-processing the same entitlement state never double-grants."""
+    sku_id = str(entitlement.sku_id)
+
+    # --- Consumable token packs ---
+    if sku_id in billing.SKU_ID_TO_EXTRA_TOKENS:
+        if getattr(entitlement, 'consumed', False):
+            return
+        tokens = billing.SKU_ID_TO_EXTRA_TOKENS[sku_id]
+        user_id = str(entitlement.user_id) if entitlement.user_id else None
+        granted_guild = None
+        with session_scope() as session:
+            guild_id = str(entitlement.guild_id) if entitlement.guild_id else (
+                user_id and _resolve_pack_guild(session, user_id)
+            )
+            if not guild_id:
+                logger.error(
+                    f"Token-pack entitlement {entitlement.id} (user {user_id}) has no "
+                    f"attributable guild; leaving unconsumed for support follow-up."
+                )
+                return
+            server = session.query(Server).filter_by(server_id=str(guild_id)).first()
+            if not server:
+                logger.error(f"Token-pack entitlement {entitlement.id}: guild {guild_id} has no server row; leaving unconsumed.")
+                return
+            server.verifications_count = (server.verifications_count or 0) + tokens
+            granted_guild = guild_id
+        # Consume only after the grant committed, so a crash can't burn the
+        # purchase; re-processing before consume is idempotent via 'consumed'.
+        try:
+            await entitlement.consume()
+            logger.info(f"Granted {tokens} extra tokens to guild {granted_guild} and consumed entitlement {entitlement.id}.")
+        except Exception:
+            logger.error(f"Failed to consume entitlement {entitlement.id} after granting tokens.", exc_info=True)
+        return
+
+    # --- Guild subscriptions ---
+    tier_info = billing.SKU_ID_TO_TIER.get(sku_id)
+    if not tier_info:
+        logger.warning(f"Entitlement {entitlement.id} references unknown SKU {sku_id}; ignoring.")
+        return
+    if not entitlement.guild_id:
+        logger.warning(f"Subscription entitlement {entitlement.id} has no guild_id; ignoring.")
+        return
+
+    guild_id = str(entitlement.guild_id)
+    ends_at = _aware(entitlement.ends_at)
+    now = datetime.now(timezone.utc)
+    active = not getattr(entitlement, 'deleted', False) and (ends_at is None or ends_at > now)
+
+    with session_scope() as session:
+        server = session.query(Server).filter_by(server_id=guild_id).first()
+        if not server:
+            server = Server(
+                server_id=guild_id,
+                owner_id=str(entitlement.user_id) if entitlement.user_id else 'UNKNOWN',
+                tier=tier_info['tier'],
+                subscription_status=False,
+                minimum_age=18,
+            )
+            session.add(server)
+
+        prev_ends = _aware(server.entitlement_ends_at)
+        is_first_grant = server.discord_entitlement_id != str(entitlement.id)
+        is_renewal = (
+            not is_first_grant
+            and ends_at is not None and prev_ends is not None
+            and ends_at > prev_ends
+        )
+        new_period = active and (is_first_grant or is_renewal)
+
+        billing.apply_tier(
+            server,
+            tier_info,
+            active=active,
+            period_start=now if new_period else None,
+        )
+        server.payment_provider = 'discord'
+        server.discord_sku_id = sku_id
+        server.discord_entitlement_id = str(entitlement.id)
+        server.entitlement_ends_at = ends_at
+        if not server.subscription_start_date:
+            server.subscription_start_date = _aware(entitlement.starts_at) or now
+
+    logger.info(
+        f"Entitlement {entitlement.id} applied to guild {guild_id}: "
+        f"{tier_info['tier']}, active={active}, ends_at={ends_at}."
+    )
+
+
+@bot.event
+async def on_entitlement_create(entitlement):
+    try:
+        await process_entitlement(entitlement)
+    except Exception:
+        logger.error("Exception in on_entitlement_create", exc_info=True)
+
+
+@bot.event
+async def on_entitlement_update(entitlement):
+    try:
+        await process_entitlement(entitlement)
+    except Exception:
+        logger.error("Exception in on_entitlement_update", exc_info=True)
+
+
+@bot.event
+async def on_entitlement_delete(entitlement):
+    """Entitlement removed entirely (e.g. refund): deactivate the server."""
+    try:
+        with session_scope() as session:
+            server = session.query(Server).filter_by(
+                discord_entitlement_id=str(entitlement.id), payment_provider='discord'
+            ).first()
+            if server:
+                server.subscription_status = False
+                logger.info(f"Entitlement {entitlement.id} deleted; guild {server.server_id} deactivated.")
+    except Exception:
+        logger.error("Exception in on_entitlement_delete", exc_info=True)
+
+
+async def reconcile_entitlements():
+    """Startup sweep: fetch current entitlements and re-apply them, covering
+    gateway events missed while the bot was down (Discord analog of
+    subscription_checker)."""
+    if not billing.SKU_ID_TO_TIER and not billing.SKU_ID_TO_EXTRA_TOKENS:
+        return
+    try:
+        count = 0
+        async for entitlement in bot.entitlements(limit=None, exclude_ended=True):
+            await process_entitlement(entitlement)
+            count += 1
+        logger.info(f"Entitlement reconciliation sweep complete ({count} active entitlements).")
+    except Exception:
+        logger.error("Entitlement reconciliation sweep failed.", exc_info=True)
+
 
 async def track_verification_attempt(discord_id):
     logger.debug(f"Tracking verification attempt for user {discord_id}")
@@ -936,14 +1146,25 @@ async def get_verify_bot(interaction: discord.Interaction):
     )
     await interaction.response.send_message(message, ephemeral=True)
 
-@bot.tree.command(name="get_subscription", description="Get the subscription link for the server")
+@bot.tree.command(name="get_subscription", description="Subscribe or buy extra verification tokens for this server")
 @app_commands.guild_only()
 async def get_subscription(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message(get_message("no_permission", interaction), ephemeral=True)
         return
 
-    await interaction.response.send_message("To activate a subscription, please visit: https://esattotech.com/pricing/", ephemeral=True)
+    loc = get_server_locale(interaction.guild.id)
+    purchase_view = build_purchase_view()
+    if purchase_view:
+        # In-client purchase via Discord's storefront (Phase 5). The
+        # esattotech link remains only for managing legacy Stripe billing.
+        _record_purchase_context(interaction.user.id, interaction.guild.id)
+        await interaction.response.send_message(
+            get_message("purchase_options", interaction, loc),
+            view=purchase_view, ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message("To activate a subscription, please visit: https://esattotech.com/pricing/", ephemeral=True)
 
 @bot.tree.command(name="server_info", description="Display current server configuration for verification")
 @app_commands.guild_only()
