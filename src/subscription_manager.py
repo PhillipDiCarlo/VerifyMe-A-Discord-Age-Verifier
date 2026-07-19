@@ -295,8 +295,24 @@ def handle_verification_subscription_update(subscription_id, status, metadata, c
                 if tier_info:
                     server.tier = tier_info['tier']
 
-                # Update last_renewal_date if we have a new current_period_start
                 if current_period_start_dt:
+                    # A renewal is when the billing period advances past the
+                    # stored last_renewal_date. On each renewal, reset the
+                    # monthly verification allowance to the tier amount
+                    # (no rollover of unused tokens).
+                    last_renewal = server.last_renewal_date
+                    if last_renewal is not None and last_renewal.tzinfo is None:
+                        # sqlite returns naive datetimes even for tz-aware columns
+                        last_renewal = last_renewal.replace(tzinfo=timezone.utc)
+
+                    is_renewal = last_renewal is None or current_period_start_dt > last_renewal
+                    if is_renewal and tier_info and status == 'active':
+                        server.verifications_count = tier_info['tokens']
+                        logging.info(
+                            f"Renewal for guild {guild_id}: verification count reset to "
+                            f"{tier_info['tokens']} ({tier_info['tier']})."
+                        )
+
                     server.last_renewal_date = current_period_start_dt
 
                 # Keep subscription_start_date for analytics, no immediate changes
