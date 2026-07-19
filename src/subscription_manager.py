@@ -2,13 +2,14 @@ import os
 import stripe
 import threading
 from flask import Flask, request, jsonify
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
-from contextlib import contextmanager
 import logging
 from datetime import datetime, timezone
+
+try:
+    from .models import Server, session_scope
+except ImportError:
+    from models import Server, session_scope
 
 # Load environment variables
 load_dotenv()
@@ -18,50 +19,6 @@ app = Flask(__name__)
 # Stripe configuration
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 endpoint_secret = os.getenv('STRIPE_PAYMENT_WEBHOOK_SECRET')
-
-# This service is scoped to the VerifyMe verification database ONLY. It must
-# never construct a connection to any other database (DJ, VRCVerify, etc.) --
-# those products no longer bill through Stripe/this repo.
-DATABASE_URL_VERIFICATION = os.getenv('DATABASE_URL_VERIFICATION')
-engine_verification = create_engine(DATABASE_URL_VERIFICATION)
-
-BaseVerification = declarative_base()
-SessionVerification = sessionmaker(bind=engine_verification)
-
-# ------------------------
-#  VERIFICATION SERVICE
-# ------------------------
-class Server(BaseVerification):
-    __tablename__ = 'servers'
-    id = Column(Integer, primary_key=True)
-    server_id = Column(String(30), nullable=False, unique=True)
-    owner_id = Column(String(30), nullable=False)
-    tier = Column(String(50), nullable=True)
-    subscription_status = Column(Boolean, default=False)
-    verifications_count = Column(Integer, default=0)
-    subscription_start_date = Column(DateTime(timezone=True), nullable=True)
-    stripe_subscription_id = Column(String(255), nullable=True)
-    role_id = Column(String(30), nullable=True)
-    email = Column(String(255), nullable=True)
-    last_renewal_date = Column(DateTime(timezone=True), nullable=True)
-
-
-# Create tables (or run migrations in production!)
-BaseVerification.metadata.create_all(engine_verification)
-
-@contextmanager
-def session_scope():
-    session = SessionVerification()
-    try:
-        yield session
-        session.commit()
-        logging.info("Transaction committed.")
-    except Exception as e:
-        session.rollback()
-        logging.error(f"Error during session scope: {e}")
-        raise
-    finally:
-        session.close()
 
 # Logging setup
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
@@ -338,8 +295,24 @@ def handle_verification_subscription_update(subscription_id, status, metadata, c
                 if tier_info:
                     server.tier = tier_info['tier']
 
-                # Update last_renewal_date if we have a new current_period_start
                 if current_period_start_dt:
+                    # A renewal is when the billing period advances past the
+                    # stored last_renewal_date. On each renewal, reset the
+                    # monthly verification allowance to the tier amount
+                    # (no rollover of unused tokens).
+                    last_renewal = server.last_renewal_date
+                    if last_renewal is not None and last_renewal.tzinfo is None:
+                        # sqlite returns naive datetimes even for tz-aware columns
+                        last_renewal = last_renewal.replace(tzinfo=timezone.utc)
+
+                    is_renewal = last_renewal is None or current_period_start_dt > last_renewal
+                    if is_renewal and tier_info and status == 'active':
+                        server.verifications_count = tier_info['tokens']
+                        logging.info(
+                            f"Renewal for guild {guild_id}: verification count reset to "
+                            f"{tier_info['tokens']} ({tier_info['tier']})."
+                        )
+
                     server.last_renewal_date = current_period_start_dt
 
                 # Keep subscription_start_date for analytics, no immediate changes

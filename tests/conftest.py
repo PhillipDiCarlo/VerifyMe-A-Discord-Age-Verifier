@@ -28,6 +28,20 @@ os.environ["DATABASE_URL_VERIFICATION"] = "sqlite:///:memory:"
 # the door on a future test doing so by accident.
 os.environ.setdefault("RABBITMQ_HOST", "invalid.test.local")
 
+# Services no longer run create_all at import (schema is managed by Alembic
+# in real deployments), so create the tables on the shared test engine here.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
+import models  # noqa: E402  (must come after the env override above)
+
+# Test modules import services both as plain modules ("import subscription_checker")
+# and as package submodules ("import src.subscription_manager"). Without this
+# alias, Python would create two separate module objects for models.py, each
+# with its own engine and its own in-memory sqlite database. Pin one identity
+# so every service — however imported — shares the same test database.
+sys.modules.setdefault("src.models", models)
+
+models.init_db()
+
 
 def pytest_runtest_setup(item):
     """Hard safety net, re-checked before every single test: if any
@@ -36,7 +50,7 @@ def pytest_runtest_setup(item):
     override above -- abort immediately instead of risking a write to a
     real database.
     """
-    for modname in ("subscription_manager", "subscription_checker", "bot", "stripe_webhook_service"):
+    for modname in ("models", "subscription_manager", "subscription_checker", "bot", "stripe_webhook_service"):
         mod = sys.modules.get(modname) or sys.modules.get(f"src.{modname}")
         if mod is None:
             continue

@@ -1,21 +1,22 @@
-import hashlib
 import os
 import json
 import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from contextlib import contextmanager
 
 import discord
 from discord import app_commands
+from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 import pika
 import stripe
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, text, inspect
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 from cryptography.fernet import Fernet
+
+try:
+    from .models import User, Server, CommandUsage, session_scope
+except ImportError:
+    from models import User, Server, CommandUsage, session_scope
 
 # Load environment variables
 load_dotenv()
@@ -36,7 +37,6 @@ logging.getLogger('pika').setLevel(getattr(logging, PIKA_LOG_LEVEL, logging.WARN
 # Retrieve environment variables
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
-DATABASE_URL = os.getenv('DATABASE_URL_VERIFICATION')
 
 
 # RabbitMQ Configuration
@@ -53,11 +53,6 @@ required_env_vars = ['DISCORD_BOT_TOKEN', 'STRIPE_SECRET_KEY', 'DATABASE_URL_VER
 missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 if missing_vars:
     raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
-
-# Database setup
-engine = create_engine(DATABASE_URL)
-Base = declarative_base()
-Session = sessionmaker(bind=engine)
 
 # Initialize the Discord bot with intents (avoid heavy member chunking at startup)
 intents = discord.Intents.default()
@@ -191,49 +186,6 @@ def decrypt_dob(encrypted_dob: str) -> datetime:
     dob_str = dob_bytes.decode('utf-8')  # Convert bytes back to string
     return datetime.strptime(dob_str, '%Y-%m-%d')  # Convert string to datetime object
 
-# Modify User model to store the encrypted DOB
-class User(Base):
-    __tablename__ = 'users'
-    id = Column(Integer, primary_key=True)
-    discord_id = Column(String(30), nullable=False)
-    verification_status = Column(Boolean, default=False)
-    last_verification_attempt = Column(DateTime(timezone=True))
-    dob = Column(String(255), nullable=True)  # Store encrypted DOB
-
-    @staticmethod
-    def get_current_time():
-        return datetime.now(timezone.utc)
-
-    def set_verification_attempt(self):
-        self.last_verification_attempt = self.get_current_time()
-
-class Server(Base):
-    __tablename__ = 'servers'
-    id = Column(Integer, primary_key=True)
-    server_id = Column(String, unique=True, nullable=False)
-    owner_id = Column(String, nullable=False)
-    role_id = Column(String, nullable=True)
-    tier = Column(String, nullable=False)
-    subscription_status = Column(Boolean, default=False)
-    verifications_count = Column(Integer, default=0)
-    subscription_start_date = Column(DateTime, nullable=True)
-    stripe_subscription_id = Column(String, nullable=True)
-    minimum_age = Column(Integer, nullable=False, default=18)
-    instructions_channel_id = Column(String, nullable=True)
-    instructions_message_id = Column(String, nullable=True)
-
-
-class CommandUsage(Base):
-    __tablename__ = 'command_usage'
-    id = Column(Integer, primary_key=True)
-    server_id = Column(String(30), nullable=False)
-    user_id = Column(String(30), nullable=False)
-    command = Column(String(50), nullable=False)
-    timestamp = Column(DateTime(timezone=True), nullable=False)
-
-# Create tables
-Base.metadata.create_all(engine)
-
 # RabbitMQ setup
 credentials = pika.PlainCredentials(RABBITMQ_USERNAME, RABBITMQ_PASSWORD)
 
@@ -283,18 +235,6 @@ def get_rabbitmq_channel():
     channel = connection.channel()
     channel.queue_declare(queue=RABBITMQ_QUEUE_NAME, durable=True)
     return channel
-
-@contextmanager
-def session_scope():
-    session = Session()
-    try:
-        yield session
-        session.commit()
-    except:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
 def get_server_config(guild_id):
     with session_scope() as session:
@@ -557,8 +497,8 @@ async def verify(interaction: discord.Interaction):
                     # Make the decrypted_dob timezone-aware (UTC)
                     decrypted_dob = decrypted_dob.replace(tzinfo=timezone.utc)
                     
-                    # Calculate the user's age
-                    user_age = (datetime.now(timezone.utc) - decrypted_dob).days // 365
+                    # Calculate the user's age in calendar years (leap-year safe)
+                    user_age = relativedelta(datetime.now(timezone.utc), decrypted_dob).years
                     
                     if user_age < server_config.minimum_age:
                         await interaction.followup.send(f"You must be at least {server_config.minimum_age} years old to be added to the role.", ephemeral=True)
@@ -571,21 +511,31 @@ async def verify(interaction: discord.Interaction):
 
             # Check cooldown if user exists and is not verified
             if user and user.last_verification_attempt:
-                logger.debug(f"User last verification attempt (UTC): {user.last_verification_attempt}")
+                last_attempt = user.last_verification_attempt
+                if last_attempt.tzinfo is None:
+                    # sqlite returns naive datetimes even for tz-aware columns
+                    last_attempt = last_attempt.replace(tzinfo=timezone.utc)
 
                 current_time_utc = datetime.now(timezone.utc)
-                logger.debug(f"Current time (UTC): {current_time_utc}")
+                cooldown_end = last_attempt + timedelta(seconds=COOLDOWN_PERIOD)
 
-                if current_time_utc - user.last_verification_attempt < timedelta(seconds=COOLDOWN_PERIOD):
-                    cooldown_end = user.last_verification_attempt + timedelta(seconds=COOLDOWN_PERIOD)
+                if current_time_utc < cooldown_end:
+                    remaining = int((cooldown_end - current_time_utc).total_seconds()) + 1
                     logger.debug(f"User {interaction.user.id} is in cooldown period until: {cooldown_end}")
-                    await interaction.followup.send(f"You're in a cooldown period. Please wait before attempting to verify again.", ephemeral=True)
+                    await interaction.followup.send(
+                        f"You're in a cooldown period. Please wait {remaining} seconds before attempting to verify again.",
+                        ephemeral=True,
+                    )
                     return
 
             # Check if there are available verifications for the server
             if server_config.verifications_count <= 0:
                 await interaction.followup.send("This server has reached its monthly verification limit. Please contact an admin to upgrade the plan or wait until next month.", ephemeral=True)
                 return
+
+            # Record the attempt BEFORE generating the Stripe URL, so a rapid
+            # double-click can't create two verification sessions.
+            await track_verification_attempt(user_id)
 
             # Directly generate a Stripe verification URL and send it (no second button)
             logger.debug(f"Generating Stripe verification URL for user {interaction.user.id}")
@@ -597,8 +547,6 @@ async def verify(interaction: discord.Interaction):
                 await interaction.followup.send("Failed to initiate the verification process. Please try again later or contact support.", ephemeral=True)
                 return
 
-            # Track verification attempt and usage
-            await track_verification_attempt(user_id)
             bot.loop.create_task(track_command_usage(guild_id, interaction.user.id, "verify"))
 
             await interaction.followup.send(

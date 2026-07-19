@@ -1,10 +1,8 @@
-import hashlib
 import os
 import json
 import logging
 import time
-from datetime import datetime
-from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Dict, Any
 
 import pika
@@ -12,9 +10,12 @@ import stripe
 from flask import Flask, request
 from dotenv import load_dotenv
 from pika.exceptions import AMQPError
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
-from sqlalchemy.orm import declarative_base, sessionmaker
 from cryptography.fernet import Fernet
+
+try:
+    from .models import User, session_scope
+except ImportError:
+    from models import User, session_scope
 
 # Load environment variables
 load_dotenv()
@@ -29,24 +30,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-# Database configuration
-DATABASE_URL = os.getenv('DATABASE_URL_VERIFICATION')
-engine = create_engine(DATABASE_URL)
-Base = declarative_base()
-Session = sessionmaker(bind=engine)
-
-# Define Users model
-class User(Base):
-    __tablename__ = 'users'
-    id = Column(Integer, primary_key=True)
-    discord_id = Column(String(50), nullable=False)
-    verification_status = Column(Boolean, default=False)
-    dob = Column(String(255), nullable=True)  # Store the encrypted DOB
-    last_verification_attempt = Column(DateTime(timezone=True), nullable=False, default=datetime.now)
-
-# Create tables
-Base.metadata.create_all(engine)
 
 # Stripe setup
 stripe.api_key = os.getenv('STRIPE_RESTRICTED_SECRET_KEY')
@@ -85,18 +68,6 @@ def _rabbitmq_parameters() -> pika.ConnectionParameters:
         retry_delay=retry_delay,
         socket_timeout=socket_timeout,
     )
-
-@contextmanager
-def session_scope():
-    session = Session()
-    try:
-        yield session
-        session.commit()
-    except:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
 # Encryption/Decryption setup
 DOB_KEY = os.getenv('DOB_KEY')
@@ -223,7 +194,7 @@ def handle_verification_verified(session_id: str) -> None:
         if user:
             user.verification_status = verification_status
             user.dob = encrypted_dob  # Store the encrypted DOB
-            user.last_verification_attempt = datetime.now()
+            user.last_verification_attempt = datetime.now(timezone.utc)
             logger.info(f"User {user_id} marked as verified with encrypted DOB")
         else:
             # Add new user if not found
@@ -231,7 +202,7 @@ def handle_verification_verified(session_id: str) -> None:
                 discord_id=user_id,
                 verification_status=verification_status,
                 dob=encrypted_dob,  # Store the encrypted DOB
-                last_verification_attempt=datetime.now()
+                last_verification_attempt=datetime.now(timezone.utc)
             )
             db_session.add(new_user)
             logger.info(f"New user {user_id} added with encrypted DOB")
@@ -263,14 +234,14 @@ def handle_verification_canceled(session: Dict[str, Any]) -> None:
         user = db_session.query(User).filter_by(discord_id=user_id).first()
         if user:
             user.verification_status = verification_status
-            user.last_verification_attempt = datetime.now()
+            user.last_verification_attempt = datetime.now(timezone.utc)
             logger.info(f"User {user_id} verification attempt canceled")
         else:
             # Add new user if not found
             new_user = User(
                 discord_id=user_id,
                 verification_status=verification_status,
-                last_verification_attempt=datetime.now()
+                last_verification_attempt=datetime.now(timezone.utc)
             )
             db_session.add(new_user)
             logger.info(f"New user {user_id} added with verification attempt canceled")
