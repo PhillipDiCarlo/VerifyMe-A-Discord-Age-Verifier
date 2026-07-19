@@ -126,7 +126,8 @@ def _add_server(session, guild_id="100", auto_verify=True, minimum_age=18):
 
 def _add_user(session, user_id="200", verified=True, birth_year=1990):
     dob = bot_module.encrypt_dob(datetime(birth_year, 1, 1))
-    session.add(User(discord_id=user_id, verification_status=verified, dob=dob))
+    session.add(User(discord_id=user_id, verification_status=verified, dob=dob,
+                     last_verification_attempt=datetime.now(timezone.utc)))
     session.commit()
 
 

@@ -50,7 +50,7 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     discord_id = Column(String(50), nullable=False)
     verification_status = Column(Boolean, default=False)
-    last_verification_attempt = Column(DateTime(timezone=True), nullable=True)
+    last_verification_attempt = Column(DateTime(timezone=True), nullable=False)
     dob = Column(String(255), nullable=True)  # Fernet-encrypted date of birth
 
     @staticmethod
