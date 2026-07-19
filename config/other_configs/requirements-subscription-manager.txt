@@ -1,0 +1,7 @@
+# subscription-manager service (src/subscription_manager.py via gunicorn)
+Flask==3.0.3
+gunicorn==22.0.0
+python-dotenv==1.0.1
+SQLAlchemy==2.0.31
+psycopg2-binary==2.9.9
+stripe==10.4.0
